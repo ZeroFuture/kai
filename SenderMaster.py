@@ -203,11 +203,13 @@ if __name__ == '__main__':
 
     def ping_timeout_handler(slave_id, ping_packet, slave_address, remaining_attempts):
         if remaining_attempts > 0:
+            print("PING timeout, retry left {}".format(remaining_attempts))
             intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
             slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, remaining_attempts - 1])
             slave_ping_timers[slave_id].start()
         else:
             # slave down, removing from the list
+            print("Slave {} down, health check reached max attempts".format(slave_id))
             slave_addresses.pop(slave_id)
             slave_ping_timers.pop(slave_id)
 
