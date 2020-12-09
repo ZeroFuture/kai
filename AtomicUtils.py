@@ -6,19 +6,24 @@ class AtomicBoolean(object):
         self.lock = threading.Lock()
         self.value = start
     
-    @classmethod
-    def negate(cls):
-        cls.lock.acquire()
+    def negate(self):
+        self.lock.acquire()
         try:
-            cls.value = not cls.value
+            self.value = not self.value
         finally:
-            cls.lock.release()
+            self.lock.release()
 
-    @classmethod
-    def get(cls):
-        cls.lock.acquire()
+    def get(self):
+        self.lock.acquire()
         try:
-            res = cls.value
+            res = self.value
         finally:
-            cls.lock.release()
+            self.lock.release()
         return res
+
+    def set(self, new_state):
+        self.lock.acquire()
+        try:
+            self.value = new_state
+        finally:
+            self.lock.release()

@@ -46,6 +46,7 @@ if __name__ == '__main__':
     intra_socket.bind(('localhost', master_slave_port))
 
     slave_addresses = {}
+    inter_ports = []
     sender_master_address = None
     number_of_segments = None
 
@@ -69,12 +70,12 @@ if __name__ == '__main__':
             packet, address = inter_socket.recvfrom(PacketSize.SENDER_MASTER_TO_RECEIVER)
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
-            print("Packet received from sender master, packet type {}".format(packet_type))
+            print("Packet received from sender master, packet type {}".format(PacketType.translate(packet_type)))
             if packet_type == PacketType.SYN:
                 print("Connected to sender master")
                 sender_master_address = address
                 number_of_segments = decoded_packet['number_of_segments']
-                syn_ack_packet = { 'packet_type': PacketType.SYN_ACK, 'slave_addresses': list(slave_addresses.values()) }
+                syn_ack_packet = { 'packet_type': PacketType.SYN_ACK, 'slave_addresses': inter_ports }
                 inter_socket.sendto(pickle.dumps(syn_ack_packet), address)
                 sender_master_syn_ack_timer = threading.Timer(SENDER_SYN_ACK_TIMEOUT, sender_syn_ack_timeout_handler, [syn_ack_packet, SENDER_SYN_ACK_ATTEMPTS])
                 sender_master_syn_ack_timer.start()
@@ -90,7 +91,7 @@ if __name__ == '__main__':
                 fin_ack_received_packet = { 'packet_type': PacketType.FIN_ACK_RECEIVED }
                 inter_socket.sendto(pickle.dumps(fin_ack_received_packet), address)
                 fin_packet = { 'packet_type': PacketType.FIN }
-                for slave_id, slave_address in slave_addresses:
+                for slave_id, slave_address in slave_addresses.items():
                     intra_socket.sendto(pickle.dumps(fin_packet), slave_address)
                     slave_fin_timers[slave_id] = threading.Timer(SLAVE_FIN_TIMEOUT, slave_fin_timeout_handler, [slave_id, fin_packet, slave_address, SLAVE_FIN_ATTEMPTS])
                     slave_fin_timers[slave_id].start()
@@ -103,16 +104,18 @@ if __name__ == '__main__':
             decoded_packet = pickle.loads(packet)
             slave_id = decoded_packet['slave_id']
             packet_type = decoded_packet['packet_type']
-            print("Packet received from receiver slave {}, packet type {}".format(slave_id, packet_type))
+            print("Packet received from receiver slave {}, packet type {}".format(slave_id, PacketType.translate(packet_type)))
             if packet_type == PacketType.SYN:
                 slave_addresses[slave_id] = address
+                inter_port = decoded_packet['inter_port']
+                inter_ports.append(inter_port)
                 syn_ack_packet = { 'packet_type': PacketType.SYN_ACK, 'output_file': output_file }
                 intra_socket.sendto(pickle.dumps(syn_ack_packet), address)
                 print("Connected to receiver slave {}".format(slave_id))
                 # notice sender master about all available receiver slaves
-                if sender_master_address is not None:
-                    print("Noticing sender master about all new slaves {}".format(list(slave_addresses.values())))
-                    receiver_addresses_packet = { 'packet_type': PacketType.RECEIVER_ADDRESSES, 'slave_addresses': list(slave_addresses.values()) }
+                if sender_master_address != None:
+                    print("Noticing sender master about all new slaves {}".format(inter_ports))
+                    receiver_addresses_packet = { 'packet_type': PacketType.RECEIVER_ADDRESSES, 'slave_addresses': inter_ports }
                     inter_socket.sendto(pickle.dumps(receiver_addresses_packet), sender_master_address)
                     sender_master_receiver_addresses_timer = threading.Timer(RECEIVER_ADDRESSES_TIMEOUT, receiver_addresses_timeout_handler, [receiver_addresses_packet, RECEIVER_ADDRESSES_ATTEMPTS])
                     sender_master_receiver_addresses_timer.start()
@@ -191,12 +194,13 @@ if __name__ == '__main__':
     def ack_schedule_event():
         global sender_master_ack_timer
         global sender_master_fin_timer
+        global sequence_base
         print("Scheduled ack event")
         missing_sequence_numbers = []
         min_unack_sequence_number = number_of_segments
-        if number_of_segments is not None and sender_master_address is not None and sequence_base < number_of_segments:
-            for i in range(base, number_of_segments):
-                if not received_sequence_numbers.contains(i):
+        if number_of_segments != None and sender_master_address != None and sequence_base < number_of_segments:
+            for i in range(sequence_base, number_of_segments):
+                if not i in received_sequence_numbers:
                     missing_sequence_numbers.append(i)
                     min_unack_sequence_number = min(min_unack_sequence_number, i)
             sequence_base = min_unack_sequence_number
@@ -205,7 +209,7 @@ if __name__ == '__main__':
             ack_packet = { 'packet_type': PacketType.ACK, 'missing_sequence_numbers': missing_sequence_numbers }
             inter_socket.sendto(pickle.dumps(ack_packet), sender_master_address)
             print("Cumulated ACK packet sent")
-            if sender_master_ack_timer is not None:
+            if sender_master_ack_timer != None:
                 # terminate previously unsent ack packet, sending the updated one
                 sender_master_ack_timer.cancel()
             sender_master_ack_timer = threading.Timer(ACK_TIMEOUT, ack_timeout_handler, [ack_packet, ACK_ATTEMPTS])
@@ -216,6 +220,14 @@ if __name__ == '__main__':
                 inter_socket.sendto(pickle.dumps(fin_packet), sender_master_address)
                 sender_master_fin_timer = threading.Timer(SENDER_FIN_TIMEOUT, sender_fin_timeout_handler, [fin_packet, SENDER_FIN_ATTEMPTS])
                 sender_master_fin_timer.start()
+            else:
+                # set up for next scheduler
+                ack_scheduler.enter(ACK_SCHEDULER_DELAY, 1, ack_schedule_event)
+                ack_scheduler.run()
+        else:
+            # set up for next scheduler
+            ack_scheduler.enter(ACK_SCHEDULER_DELAY, 1, ack_schedule_event)
+            ack_scheduler.run()
 
     def terminate():
         # all slaves and receiver master is terminated, terminate sender master here
@@ -228,3 +240,4 @@ if __name__ == '__main__':
     slaves_listener_thread.start()
     sender_master_listener_thread.start()
     ack_scheduler.enter(ACK_SCHEDULER_DELAY, 1, ack_schedule_event)
+    ack_scheduler.run()

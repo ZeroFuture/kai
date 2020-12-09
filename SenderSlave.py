@@ -58,19 +58,17 @@ if __name__ == '__main__':
             packet, address = intra_socket.recvfrom(PacketSize.SENDER_MASTER_TO_SLAVE)
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
-            print("Packet received from sender master, packet type {}".format(packet_type))
+            print("Packet received from sender master, packet type {}".format(PacketType.translate(packet_type)))
             if packet_type == PacketType.SYN_ACK:
                 input_file = decoded_packet['input_file']
                 print("Joined sender cluster, input file {}".format(input_file))
                 sender_master_syn_timer.cancel()
                 syn_ack_received_packet = { 'packet_type': PacketType.SYN_ACK_RECEIVED, 'slave_id': slave_id }
                 intra_socket.sendto(pickle.dumps(syn_ack_received_packet), address)
-            elif packet_type == PacketType.ASSIGN and input_file is not None:
+            elif packet_type == PacketType.ASSIGN and input_file != None:
                 # SYN_ACK should be received previous to ASSIGN, but the packet might arrive later.
                 # Eventually we can still get input file because if we do not send ASSIGN_ACK, master will send it again
                 # SYN_ACK will be sent again as well
-                assign_ack_packet = { 'packet_type': PacketType.ASSIGN_ACK, 'slave_id': slave_id }
-                intra_socket.sendto(pickle.dumps(assign_ack_packet), address)
                 sequence_number = decoded_packet['sequence_number']
                 receiver_slave_address = decoded_packet['receiver_slave_address']
                 data = None

@@ -9,7 +9,6 @@ from AtomicUtils import *
 from PacketUtils import *
 
 SYN_TIMEOUT = 3
-ASSIGN_TIMEOUT = 3
 SYN_ACK_TIMEOUT = 3
 FIN_TIMEOUT = 3
 FIN_ACK_TIMEOUT = 3
@@ -44,7 +43,6 @@ if __name__ == '__main__':
     receiver_master_address = (receiver_master_ip, receiver_master_port)
     slave_addresses = {}
     receiver_slave_addresses = []
-    slave_assign_timers = {}
     slave_syn_ack_timers = {}
     slave_fin_timers = {}
     receiver_master_syn_timer = None
@@ -72,14 +70,10 @@ if __name__ == '__main__':
                     slave_id = random.choice(list(slave_addresses))
                     slave_address = slave_addresses[slave_id]
                     receiver_slave_address = random.choice(receiver_slave_addresses)
-                    # slave available
-                    if not slave_id in slave_assign_timers:
-                        print("Assigning packet sequence {} to slave {} with receiver slave address {}".format(sequence_number, slave_id, receiver_slave_address))
-                        assign_packet = { 'packet_type': PacketType.ASSIGN, 'sequence_number': sequence_number, 'receiver_slave_address': receiver_slave_address }
-                        intra_socket.sendto(pickle.dumps(assign_packet), slave_address)
-                        slave_assign_timers[slave_id] = threading.Timer(ASSIGN_TIMEOUT, assign_timeout_handler, [sequence_number])
-                        slave_assign_timers[slave_id].start()
-                        is_packet_assigned = True
+                    print("Assigning packet sequence {} to slave {} with receiver slave address {}".format(sequence_number, slave_id, receiver_slave_address))
+                    assign_packet = { 'packet_type': PacketType.ASSIGN, 'sequence_number': sequence_number, 'receiver_slave_address': receiver_slave_address }
+                    intra_socket.sendto(pickle.dumps(assign_packet), slave_address)
+                    is_packet_assigned = True
 
     def sender_slave_listener():
         print("Listening to sender slaves")
@@ -88,7 +82,7 @@ if __name__ == '__main__':
             decoded_packet = pickle.loads(packet)
             slave_id = decoded_packet['slave_id']
             packet_type = decoded_packet['packet_type']
-            print("Packet received from sender slave {}, packet type {}".format(slave_id, packet_type))
+            print("Packet received from sender slave {}, packet type {}".format(slave_id, PacketType.translate(packet_type)))
             if packet_type == PacketType.SYN:
                 slave_addresses[slave_id] = address
                 syn_ack_packet = { 'packet_type': PacketType.SYN_ACK, 'input_file': input_file }
@@ -99,9 +93,6 @@ if __name__ == '__main__':
                     slave_syn_ack_timers[slave_id].start()
             elif packet_type == PacketType.SYN_ACK_RECEIVED:
                 slave_syn_ack_timers[slave_id].cancel()
-            elif packet_type == PacketType.ASSIGN_ACK:
-                slave_assign_timers[slave_id].cancel()
-                slave_assign_timers[slave_id] = None
             elif packet_type == PacketType.FIN_ACK:
                 slave_fin_timers[slave_id].cancel()
                 fin_ack_received_packet = { 'packet_type': PacketType.FIN_ACK_RECEIVED }
@@ -122,7 +113,7 @@ if __name__ == '__main__':
             packet, address = inter_socket.recvfrom(PacketSize.RECEIVER_MASTER_TO_SENDER)
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
-            print("Packet received from receiver master, packet type {}".format(packet_type))
+            print("Packet received from receiver master, packet type {}".format(PacketType.translate(packet_type)))
             if packet_type == PacketType.RECEIVER_ADDRESSES:
                 receiver_slave_addresses = decoded_packet['slave_addresses']
                 print("Updated receiver slave addresses to {}".format(receiver_slave_addresses))
@@ -153,7 +144,7 @@ if __name__ == '__main__':
                 receiver_master_fin_ack_timer.start()
                 # asking all sender slaves to terminate
                 fin_packet = { 'packet_type': PacketType.FIN }
-                for slave_id, slave_address in slave_addresses:
+                for slave_id, slave_address in slave_addresses.items():
                     intra_socket.sendto(pickle.dumps(fin_packet), slave_address)
                     print("Noticing slave {} to terminate".format(slave_id))
                     slave_fin_timers[slave_id] = threading.Timer(FIN_TIMEOUT, fin_timeout_handler, [slave_id, fin_packet, slave_address, FIN_ATTEMPTS])
@@ -173,11 +164,6 @@ if __name__ == '__main__':
             inter_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
             receiver_master_syn_timer = threading.Timer(SYN_TIMEOUT, syn_timeout_handler, [syn_packet, remaining_attempts - 1])
             receiver_master_syn_timer.start()
-
-    def assign_timeout_handler(sequence_number):
-        print("ASSIGN timeout, retry")
-        # simply re-assign the packets to other slaves if we did not receive ack
-        assign_sequence_numbers([sequence_number])
 
     def syn_ack_timeout_handler(slave_id, syn_ack_packet, slave_address, remaining_attempts):
         # recursively resend the syn_ack packet until no remaining attempts left we we assume that slave is down

@@ -48,7 +48,7 @@ if __name__ == '__main__':
 
     def join_cluster():
         global receiver_master_syn_ack_timer
-        syn_packet = { 'packet_type': PacketType.SYN, 'slave_id': slave_id }
+        syn_packet = { 'packet_type': PacketType.SYN, 'slave_id': slave_id, 'inter_port': ('localhost', slave_slave_port) }
         intra_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
         print("Joining receiver cluster")
         receiver_master_syn_ack_timer = threading.Timer(SYN_ACK_TIMEOUT, syn_timeout_handler, [syn_packet, SYN_ACK_ATTEMPTS])
@@ -61,8 +61,8 @@ if __name__ == '__main__':
             packet, address = inter_socket.recvfrom(PacketSize.SENDER_SLAVE_TO_RECEIVER)
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
-            print("Packet received from sender slave, packet type {}".format(packet_type))
-            if packet_type == PacketType.DATA and output_file is not None:
+            print("Packet received from sender slave, packet type {}".format(PacketType.translate(packet_type)))
+            if packet_type == PacketType.DATA and output_file != None:
                 sequence_number = decoded_packet['sequence_number']
                 print("Noticing receiver master received packet with {}".format(sequence_number))
                 packet_received_packet = { 'packet_type': PacketType.PACKET_RECEIVED, 'slave_id': slave_id, 'sequence_number': sequence_number }
@@ -70,19 +70,20 @@ if __name__ == '__main__':
                 receiver_master_packet_received_timer = threading.Timer(PACKET_RECEIVED_TIMEOUT, packet_received_timeout_handler, [packet_received_packet, PACKET_RECEIVED_ATTEMPTS])
                 receiver_master_packet_received_timer.start()
                 data = decoded_packet['data']
-                with open(output_file, 'wb') as f:
+                with open(output_file, 'w') as f:
                     f.seek(sequence_number * PacketSize.DATA_SEGMENT)
                     f.write(data)
-                print("Data with sequence {} received and wrote to file")
+                print("Data with sequence {} received and wrote to file".format(sequence_number))
 
     def receiver_master_listener():
         global receiver_master_fin_ack_timer
+        global output_file
         print("Listening to receiver master")
         while True:
             packet, address = intra_socket.recvfrom(PacketSize.RECEIVER_MASTER_TO_SLAVE)
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
-            print("Packet received from receiver master, packet type {}".format(packet_type))
+            print("Packet received from receiver master, packet type {}".format(PacketType.translate(packet_type)))
             if packet_type == PacketType.SYN_ACK:
                 output_file = decoded_packet['output_file']
                 print("Joined receiver cluster, output file {}".format(output_file))
