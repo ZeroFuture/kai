@@ -208,6 +208,7 @@ if __name__ == '__main__':
             sender_master_ack_timer.start()
     
     def ping_timeout_handler(slave_id, ping_packet, slave_address, remaining_attempts):
+        global sequence_base
         if remaining_attempts > 0:
             intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
             slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, remaining_attempts - 1])
@@ -223,6 +224,11 @@ if __name__ == '__main__':
             inter_socket.sendto(pickle.dumps(receiver_addresses_packet), sender_master_address)
             sender_master_receiver_addresses_timer = threading.Timer(RECEIVER_ADDRESSES_TIMEOUT, receiver_addresses_timeout_handler, [receiver_addresses_packet, RECEIVER_ADDRESSES_ATTEMPTS])
             sender_master_receiver_addresses_timer.start()
+            # reset sequence base and remove packets received in that slave
+            for sequence in slave_received_sequences[slave_id]:
+                sequence_base = min(sequence_base, sequence)
+                received_sequence_set.remove(sequence)
+            slave_received_sequences.pop(slave_id)
     
     def ack_schedule_event():
         global sender_master_ack_timer
@@ -288,7 +294,6 @@ if __name__ == '__main__':
             slave_ping_timers[slave_id].start()
         ping_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
         ping_scheduler.run()
-        
 
     def generate_output_file():
         packet_positions = [None] * number_of_segments
