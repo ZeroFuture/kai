@@ -1,0 +1,99 @@
+import sys
+import threading
+import time
+import os
+import uuid
+import pickle
+from socket import *
+from AtomicUtils import *
+from PacketUtils import *
+
+# sender <sender_master_DNS_name> <sender_master_port_number>
+
+SYN_TIMEOUT = 3
+FIN_ACK_TIMEOUT = 3
+
+SYN_ATTEMPTS = 3
+FIN_ACK_ATTEMPTS = 3
+
+if __name__ == '__main__':
+
+    if len(sys.argv) != 3:
+        print("Usage: python3 SenderSlave.py <sender_master_DNS_name> <sender_master_port_number>")
+        sys.exit()
+
+    try:
+        sender_master_port_number = int(sys.argv[2])
+    except:
+        print("Port number should be numerical value")
+        sys.exit()
+    sender_master_ip_address = sys.argv[1]
+
+    sender_master_address = (sender_master_ip_address, sender_master_port_number)
+    input_file = None
+    inter_socket = socket(AF_INET, SOCK_DGRAM)
+    intra_socket = socket(AF_INET, SOCK_DGRAM)
+    sender_master_syn_timer = None
+    sender_master_fin_ack_timer = None
+
+    slave_id = str(uuid.uuid1())
+
+    def join_cluster():
+        syn_packet = { 'packet_type': PacketType.SYN, 'slave_id': slave_id }
+        intra_socket.sendto(pickle.dumps(syn_packet), sender_master_address)
+        sender_master_syn_timer = threading.Timer(SYN_TIMEOUT, syn_timeout_handler, [syn_packet, SYN_ATTEMPTS])
+        sender_master_syn_timer.start()
+
+    def sender_master_listener():
+        while True:
+            packet, address = intra_socket.recvfrom(PacketSize.SENDER_MASTER_TO_SLAVE)
+            decoded_packet = pickle.loads(packet)
+            packet_type = decoded_packet['packet_type']
+            if packet_type == PacketType.SYN_ACK:
+                input_file = decoded_packet['input_file']
+                sender_master_syn_timer.cancel()
+                syn_ack_received_packet = { 'packet_type': PacketType.SYN_ACK_RECEIVED, 'slave_id': slave_id }
+                intra_socket.sendto(pickle.dumps(syn_ack_received_packet), address)
+            elif packet_type == PacketType.ASSIGN and input_file is not None:
+                # SYN_ACK should be received previous to ASSIGN, but the packet might arrive later.
+                # Eventually we can still get input file because if we do not send ASSIGN_ACK, master will send it again
+                # SYN_ACK will be sent again as well
+                assign_ack_packet = { 'packet_type': PacketType.ASSIGN_ACK, 'slave_id': slave_id }
+                intra_socket.sendto(pickle.dumps(assign_ack_packet), address)
+                sequence_number = decoded_packet['sequence_number']
+                receiver_slave_address = decoded_packet['receiver_slave_address']
+                data = None
+                with open(input_file) as f:
+                    f.seek(sequence_number * PacketSize.DATA_SEGMENT)
+                    data = f.read(PacketSize.DATA_SEGMENT)
+                data_packet = { 'packet_type': PacketType.DATA, 'sequence_number': sequence_number, 'data': data }
+                # No need to listen for ACK here, missing packets will be sent again. (Performance gain)
+                inter_socket.sendto(pickle.dumps(data_packet), receiver_slave_address)
+            elif packet_type == PacketType.FIN:
+                fin_ack_packet = { 'packet_type': PacketType.FIN_ACK, 'slave_id': slave_id }
+                intra_socket.sendto(pickle.dumps(fin_ack_packet), address)
+                sender_master_fin_ack_timer = threading.Timer(FIN_ACK_TIMEOUT, fin_ack_timeout_handler, [fin_ack_packet, FIN_ACK_ATTEMPTS])
+                sender_master_fin_ack_timer.start()
+            elif packet_type == PacketType.FIN_ACK_RECEIVED:
+                sender_master_fin_ack_timer.cancel()
+                terminate()
+
+    def syn_timeout_handler(syn_packet, remaining_attempts):
+        if remaining_attempts > 0:
+            intra_socket.sendto(pickle.dumps(syn_packet), sender_master_address)
+            sender_master_syn_timer = threading.Timer(SYN_TIMEOUT, syn_timeout_handler, [syn_packet, remaining_attempts - 1])
+            sender_master_syn_timer.start()
+
+    def fin_ack_timeout_handler(fin_ack_packet, remaining_attempts):
+        if remaining_attempts > 0:
+            intra_socket.sendto(pickle.dumps(fin_ack_packet), sender_master_address)
+            sender_master_fin_ack_timer = threading.Timer(FIN_ACK_TIMEOUT, fin_ack_timeout_handler, [fin_ack_packet, remaining_attempts - 1])
+            sender_master_fin_ack_timer.start()
+    
+    def terminate():
+        inter_socket.close()
+        intra_socket.close()
+        os._exit(1)
+
+    join_cluster()
+        
