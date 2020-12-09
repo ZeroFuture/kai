@@ -3,6 +3,7 @@ import threading
 import random
 import os
 import pickle
+import math
 from socket import *
 from AtomicUtils import *
 from PacketUtils import *
@@ -18,26 +19,26 @@ SYN_ACK_ATTEMPTS = 3
 FIN_ATTEMPTS = 3
 FIN_ACK_ATTEMPTS = 3
 
-# sender <master_slave_port> <receiver_master_ip> <receiver_master_port> <window_size> <input_file>
-
 if __name__ == '__main__':
     
-    if len(sys.argv) != 5:
-        print("Usage: python3 SenderMaster.py <master_slave_port> <receiver_master_ip> <receiver_master_port> <input_file>")
+    if len(sys.argv) != 6:
+        print("Usage: python3 SenderMaster.py <master_master_port> <master_slave_port> <receiver_master_ip> <receiver_master_port> <input_file>")
         sys.exit()
 
     try:
-        master_slave_port = int(sys.argv[1])
-        receiver_master_port = int(sys.argv[3])
+        master_master_port = int(sys.argv[1])
+        master_slave_port = int(sys.argv[2])
+        receiver_master_port = int(sys.argv[4])
     except:
         print("Port numbers and max window size should be numerical value")
         sys.exit()
 
-    receiver_master_ip = sys.argv[2]
-    input_file = sys.argv[4]
+    receiver_master_ip = sys.argv[3]
+    input_file = sys.argv[5]
     
     inter_socket = socket(AF_INET, SOCK_DGRAM)
     intra_socket = socket(AF_INET, SOCK_DGRAM)
+    inter_socket.bind(('localhost', master_master_port))
     intra_socket.bind(('localhost', master_slave_port))
 
     receiver_master_address = (receiver_master_ip, receiver_master_port)
@@ -50,10 +51,11 @@ if __name__ == '__main__':
     receiver_master_fin_ack_timer = None
     
     file_size = os.stat(input_file).st_size
-    number_of_segments = Math.ceil(file_size / PacketSize.DATA_SEGMENT)
+    number_of_segments = math.ceil(file_size / PacketSize.DATA_SEGMENT)
     is_receiver_terminated = AtomicBoolean(False)
 
     def connect_to_receiver_master():
+        global receiver_master_syn_timer
         # three-way handshake to establish connection with receiver master
         print("Connecting to receiver master")
         syn_packet = { 'packet_type': PacketType.SYN, 'number_of_segments': number_of_segments }
@@ -64,19 +66,20 @@ if __name__ == '__main__':
     def assign_sequence_numbers(sequence_numbers):
         for sequence_number in sequence_numbers:
             is_packet_assigned = False
-            while not is_packet_assigned and len(receiver_slave_addresses) > 0:
-                # randomly choose a slave to assign this sequence_number
-                slave_id = random.choice(list(slave_addresses))
-                slave_address = slave_addresses[slave_id]
-                receiver_slave_address = random.choice(receiver_slave_addresses)
-                # slave available
-                if slave_assign_timers[slave_id] is None:
-                    print("Assigning packet sequence {} to slave {} with receiver slave address {}".format(sequence_number, slave_id, receiver_slave_address))
-                    assign_packet = { 'packet_type': PacketType.ASSIGN, 'sequence_number': sequence_number, 'receiver_slave_address': receiver_slave_address }
-                    intra_socket.sendto(pickle.dumps(assign_packet), slave_address)
-                    slave_assign_timers[slave_id] = threading.Timer(ASSIGN_TIMEOUT, assign_timeout_handler, [sequence_number])
-                    slave_assign_timers[slave_id].start()
-                    is_packet_assigned = True
+            while not is_packet_assigned:
+                if len(slave_addresses) > 0 and len(receiver_slave_addresses) > 0:
+                    # randomly choose a slave to assign this sequence_number
+                    slave_id = random.choice(list(slave_addresses))
+                    slave_address = slave_addresses[slave_id]
+                    receiver_slave_address = random.choice(receiver_slave_addresses)
+                    # slave available
+                    if not slave_id in slave_assign_timers:
+                        print("Assigning packet sequence {} to slave {} with receiver slave address {}".format(sequence_number, slave_id, receiver_slave_address))
+                        assign_packet = { 'packet_type': PacketType.ASSIGN, 'sequence_number': sequence_number, 'receiver_slave_address': receiver_slave_address }
+                        intra_socket.sendto(pickle.dumps(assign_packet), slave_address)
+                        slave_assign_timers[slave_id] = threading.Timer(ASSIGN_TIMEOUT, assign_timeout_handler, [sequence_number])
+                        slave_assign_timers[slave_id].start()
+                        is_packet_assigned = True
 
     def sender_slave_listener():
         print("Listening to sender slaves")
@@ -91,7 +94,7 @@ if __name__ == '__main__':
                 syn_ack_packet = { 'packet_type': PacketType.SYN_ACK, 'input_file': input_file }
                 intra_socket.sendto(pickle.dumps(syn_ack_packet), address)
                 print("slave {} joined cluster".format(slave_id))
-                if slave_syn_ack_timers[slave_id] is None:
+                if not slave_id in slave_syn_ack_timers:
                     slave_syn_ack_timers[slave_id] = threading.Timer(SYN_ACK_TIMEOUT, syn_ack_timeout_handler, [slave_id, syn_ack_packet, address, SYN_ACK_ATTEMPTS])
                     slave_syn_ack_timers[slave_id].start()
             elif packet_type == PacketType.SYN_ACK_RECEIVED:
@@ -103,7 +106,7 @@ if __name__ == '__main__':
                 slave_fin_timers[slave_id].cancel()
                 fin_ack_received_packet = { 'packet_type': PacketType.FIN_ACK_RECEIVED }
                 intra_socket.sendto(pickle.dumps(fin_ack_received_packet), address)
-                if slave_addresses[slave_id] is not None:
+                if slave_id in slave_addresses:
                     # finished termination with this slave, removing it from the list
                     slave_addresses.pop(slave_id)
                     if len(slave_addresses) == 0 and is_receiver_terminated.get():
@@ -112,6 +115,8 @@ if __name__ == '__main__':
                         terminate()
 
     def receiver_master_listener():
+        global receiver_slave_addresses
+        global receiver_master_fin_ack_timer
         print("Listening to receiver master")
         while True:
             packet, address = inter_socket.recvfrom(PacketSize.RECEIVER_MASTER_TO_SENDER)
@@ -126,6 +131,8 @@ if __name__ == '__main__':
             elif packet_type == PacketType.SYN_ACK:
                 print("Receiver master connected")
                 receiver_master_syn_timer.cancel()
+                receiver_slave_addresses = decoded_packet['slave_addresses']
+                print("Current receiver slave addresses are {}".format(receiver_slave_addresses))
                 syn_ack_received_packet = { 'packet_type': PacketType.SYN_ACK_RECEIVED }
                 inter_socket.sendto(pickle.dumps(syn_ack_received_packet), address)
             elif packet_type == PacketType.ACK:
@@ -160,6 +167,7 @@ if __name__ == '__main__':
                     terminate()
 
     def syn_timeout_handler(syn_packet, remaining_attempts):
+        global receiver_master_syn_timer
         if remaining_attempts > 0:
             print("SYN timeout, retry left {}".format(remaining_attempts))
             inter_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
@@ -188,6 +196,7 @@ if __name__ == '__main__':
             slave_fin_timers[slave_id].start()
 
     def fin_ack_timeout_handler(fin_ack_packet, remaining_attempts):
+        global receiver_master_fin_ack_timer
         # recursively resend the fin_ack packet until no remaining attempts left we we assume that receiver master is down
         if remaining_attempts > 0:
             print("FIN_ACK timeout, retry left {}".format(remaining_attempts))
@@ -201,9 +210,9 @@ if __name__ == '__main__':
         intra_socket.close()
         os._exit(1)
 
+    connect_to_receiver_master()
     slaves_listener_thread = threading.Thread(target=sender_slave_listener)
     receiver_master_listener_thread = threading.Thread(target=receiver_master_listener)
     slaves_listener_thread.start()
     receiver_master_listener_thread.start()
-    connect_to_receiver_master()
     assign_sequence_numbers(list(range(0, number_of_segments)))

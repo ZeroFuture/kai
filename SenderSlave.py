@@ -8,8 +8,6 @@ from socket import *
 from AtomicUtils import *
 from PacketUtils import *
 
-# sender <sender_master_DNS_name> <sender_master_port_number>
-
 SYN_TIMEOUT = 3
 FIN_ACK_TIMEOUT = 3
 
@@ -18,27 +16,35 @@ FIN_ACK_ATTEMPTS = 3
 
 if __name__ == '__main__':
 
-    if len(sys.argv) != 3:
-        print("Usage: python3 SenderSlave.py <sender_master_DNS_name> <sender_master_port_number>")
+    if len(sys.argv) != 5:
+        print("Usage: python3 SenderSlave.py <slave_master_port> <slave_slave_port> <sender_master_DNS_name> <sender_master_port_number>")
         sys.exit()
 
     try:
-        sender_master_port_number = int(sys.argv[2])
+        slave_master_port = int(sys.argv[1])
+        slave_slave_port = int(sys.argv[2])
+        sender_master_port_number = int(sys.argv[4])
     except:
         print("Port number should be numerical value")
         sys.exit()
-    sender_master_ip_address = sys.argv[1]
+    sender_master_ip_address = sys.argv[3]
 
     sender_master_address = (sender_master_ip_address, sender_master_port_number)
     input_file = None
+
     inter_socket = socket(AF_INET, SOCK_DGRAM)
     intra_socket = socket(AF_INET, SOCK_DGRAM)
+    inter_socket.bind(('localhost', slave_slave_port))
+    intra_socket.bind(('localhost', slave_master_port))
+
     sender_master_syn_timer = None
     sender_master_fin_ack_timer = None
 
     slave_id = str(uuid.uuid1())
+    print("Slave ID {}".format(slave_id))
 
     def join_cluster():
+        global sender_master_syn_timer
         syn_packet = { 'packet_type': PacketType.SYN, 'slave_id': slave_id }
         intra_socket.sendto(pickle.dumps(syn_packet), sender_master_address)
         print("Joining sender cluster")
@@ -47,6 +53,7 @@ if __name__ == '__main__':
 
     def sender_master_listener():
         print("Listening to sender master")
+        global sender_master_fin_ack_timer
         while True:
             packet, address = intra_socket.recvfrom(PacketSize.SENDER_MASTER_TO_SLAVE)
             decoded_packet = pickle.loads(packet)
@@ -85,6 +92,7 @@ if __name__ == '__main__':
                 terminate()
 
     def syn_timeout_handler(syn_packet, remaining_attempts):
+        global sender_master_syn_timer
         if remaining_attempts > 0:
             print("SYN timeout, retry left {}".format(remaining_attempts))
             intra_socket.sendto(pickle.dumps(syn_packet), sender_master_address)
@@ -92,6 +100,7 @@ if __name__ == '__main__':
             sender_master_syn_timer.start()
 
     def fin_ack_timeout_handler(fin_ack_packet, remaining_attempts):
+        global sender_master_fin_ack_timer
         if remaining_attempts > 0:
             print("FIN_ACK timeout, retry left {}".format(remaining_attempts))
             intra_socket.sendto(pickle.dumps(fin_ack_packet), sender_master_address)
@@ -104,4 +113,6 @@ if __name__ == '__main__':
         os._exit(1)
 
     join_cluster()
+    sender_master_listen_thread = threading.Thread(target=sender_master_listener)
+    sender_master_listen_thread.start()
         
