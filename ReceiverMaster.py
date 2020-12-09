@@ -155,7 +155,7 @@ if __name__ == '__main__':
     def slave_syn_ack_timeout_handler(slave_id, syn_ack_packet, slave_address, remaining_attempts):
         # recursively resend the syn_ack packet until no remaining attempts left we we assume that slave is down
         if remaining_attempts > 0:
-            print("slave SYN_ACK timeout, retry left {}".format(remaining_attempts))
+            print("slave SYN_ACK timeout on slave {}, retry left {}".format(slave_id, remaining_attempts))
             intra_socket.sendto(pickle.dumps(syn_ack_packet), slave_address)
             slave_syn_ack_timers[slave_id] = threading.Timer(SLAVE_SYN_ACK_TIMEOUT, slave_syn_ack_timeout_handler, [slave_id, syn_ack_packet, slave_address, remaining_attempts - 1])
             slave_syn_ack_timers[slave_id].start()
@@ -163,7 +163,7 @@ if __name__ == '__main__':
     def slave_fin_timeout_handler(slave_id, fin_packet, slave_address, remaining_attempts):
         # recursively resend the fin packet until no remaining attempts left we we assume that slave is down
         if remaining_attempts > 0:
-            print("slave FIN timeout, retry left {}".format(remaining_attempts))
+            print("slave FIN timeout on slave {}, retry left {}".format(slave_id, remaining_attempts))
             intra_socket.sendto(pickle.dumps(fin_packet), slave_address)
             slave_fin_timers[slave_id] = threading.Timer(SLAVE_FIN_TIMEOUT, slave_fin_timeout_handler, [slave_id, fin_packet, slave_address, remaining_attempts - 1])
             slave_fin_timers[slave_id].start()
