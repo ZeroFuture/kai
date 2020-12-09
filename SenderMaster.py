@@ -4,6 +4,8 @@ import random
 import os
 import pickle
 import math
+import sched
+import time
 from socket import *
 from AtomicUtils import *
 from PacketUtils import *
@@ -12,11 +14,15 @@ SYN_TIMEOUT = 3
 SYN_ACK_TIMEOUT = 3
 FIN_TIMEOUT = 3
 FIN_ACK_TIMEOUT = 3
+PING_TIMEOUT = 1
 
 SYN_ATTEMPTS = 3
 SYN_ACK_ATTEMPTS = 3
 FIN_ATTEMPTS = 3
 FIN_ACK_ATTEMPTS = 3
+PING_ATTEMPTS = 3
+
+PING_SCHEDULER_DELAY = 5
 
 if __name__ == '__main__':
     
@@ -45,12 +51,15 @@ if __name__ == '__main__':
     receiver_slave_addresses = []
     slave_syn_ack_timers = {}
     slave_fin_timers = {}
+    slave_ping_timers = {}
     receiver_master_syn_timer = None
     receiver_master_fin_ack_timer = None
     
     file_size = os.stat(input_file).st_size
     number_of_segments = math.ceil(file_size / PacketSize.DATA_SEGMENT)
     is_receiver_terminated = AtomicBoolean(False)
+
+    ping_scheduler = sched.scheduler(time.time, time.sleep)
 
     def connect_to_receiver_master():
         global receiver_master_syn_timer
@@ -93,6 +102,8 @@ if __name__ == '__main__':
                     slave_syn_ack_timers[slave_id].start()
             elif packet_type == PacketType.SYN_ACK_RECEIVED:
                 slave_syn_ack_timers[slave_id].cancel()
+            elif packet_type == PacketType.PING_ACK and slave_id in slave_ping_timers:
+                slave_ping_timers[slave_id].cancel()
             elif packet_type == PacketType.FIN_ACK:
                 slave_fin_timers[slave_id].cancel()
                 fin_ack_received_packet = { 'packet_type': PacketType.FIN_ACK_RECEIVED }
@@ -190,6 +201,25 @@ if __name__ == '__main__':
             receiver_master_fin_ack_timer = threading.Timer(FIN_ACK_TIMEOUT, fin_ack_timeout_handler, [fin_ack_packet, remaining_attempts - 1])
             receiver_master_fin_ack_timer.start()
 
+    def ping_timeout_handler(slave_id, ping_packet, slave_address, remaining_attempts):
+        if remaining_attempts > 0:
+            intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
+            slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, remaining_attempts - 1])
+            slave_ping_timers[slave_id].start()
+        else:
+            # slave down, removing from the list
+            slave_addresses.pop(slave_id)
+            slave_ping_timers.pop(slave_id)
+
+    def ping_schedule_event():
+        for slave_id, slave_address in slave_addresses.items():
+            ping_packet = { 'packet_type': PacketType.PING }
+            intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
+            slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
+            slave_ping_timers[slave_id].start()
+        ping_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
+        ping_scheduler.run()
+
     def terminate():
         # all slaves and receiver master is terminated, terminate sender master here
         inter_socket.close()
@@ -201,4 +231,6 @@ if __name__ == '__main__':
     receiver_master_listener_thread = threading.Thread(target=receiver_master_listener)
     slaves_listener_thread.start()
     receiver_master_listener_thread.start()
+    ping_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
+    ping_scheduler.run()
     assign_sequence_numbers(list(range(0, number_of_segments)))

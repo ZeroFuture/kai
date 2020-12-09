@@ -79,6 +79,9 @@ if __name__ == '__main__':
                 # No need to listen for ACK here, missing packets will be sent again. (Performance gain)
                 inter_socket.sendto(pickle.dumps(data_packet), receiver_slave_address)
                 print("Sending packet with sequence {} to receiver address {}".format(sequence_number, receiver_slave_address))
+            elif packet_type == PacketType.PING:
+                ping_ack_packet = { 'packet_type': PacketType.PING_ACK, 'slave_id': slave_id }
+                intra_socket.sendto(pickle.dumps(ping_ack_packet), address)
             elif packet_type == PacketType.FIN:
                 fin_ack_packet = { 'packet_type': PacketType.FIN_ACK, 'slave_id': slave_id }
                 intra_socket.sendto(pickle.dumps(fin_ack_packet), address)

@@ -32,7 +32,7 @@ if __name__ == '__main__':
     receiver_master_ip_address = sys.argv[3]
 
     receiver_master_address = (receiver_master_ip_address, receiver_master_port_number)
-    output_file = None
+    slave_file = None
 
     inter_socket = socket(AF_INET, SOCK_DGRAM)
     intra_socket = socket(AF_INET, SOCK_DGRAM)
@@ -42,6 +42,8 @@ if __name__ == '__main__':
     receiver_master_syn_ack_timer = None
     receiver_master_fin_ack_timer = None
     receiver_master_packet_received_timer = None
+    received_sequences = []
+    received_sequence_set = set()
 
     slave_id = str(uuid.uuid1())
     print("Slave ID {}".format(slave_id))
@@ -62,22 +64,25 @@ if __name__ == '__main__':
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
             print("Packet received from sender slave, packet type {}".format(PacketType.translate(packet_type)))
-            if packet_type == PacketType.DATA and output_file != None:
+            if packet_type == PacketType.DATA and slave_file != None:
                 sequence_number = decoded_packet['sequence_number']
-                print("Noticing receiver master received packet with {}".format(sequence_number))
-                packet_received_packet = { 'packet_type': PacketType.PACKET_RECEIVED, 'slave_id': slave_id, 'sequence_number': sequence_number }
-                intra_socket.sendto(pickle.dumps(packet_received_packet), receiver_master_address)
-                receiver_master_packet_received_timer = threading.Timer(PACKET_RECEIVED_TIMEOUT, packet_received_timeout_handler, [packet_received_packet, PACKET_RECEIVED_ATTEMPTS])
-                receiver_master_packet_received_timer.start()
-                data = decoded_packet['data']
-                with open(output_file, 'w') as f:
-                    f.seek(sequence_number * PacketSize.DATA_SEGMENT)
-                    f.write(data)
-                print("Data with sequence {} received and wrote to file".format(sequence_number))
+                # we may receive duplicate packets, simply ignore
+                if not sequence_number in received_sequence_set:
+                    received_sequences.append(sequence_number)
+                    received_sequence_set.add(sequence_number)
+                    data = decoded_packet['data']
+                    with open(slave_file, 'w') as f:
+                        f.write(data)
+                    print("Data with sequence {} received and write to temp file".format(sequence_number))
+                    print("Noticing receiver master received packet with {}".format(sequence_number))
+                    packet_received_packet = { 'packet_type': PacketType.PACKET_RECEIVED, 'slave_id': slave_id, 'sequence_number': sequence_number, 'received_sequences': received_sequences }
+                    intra_socket.sendto(pickle.dumps(packet_received_packet), receiver_master_address)
+                    receiver_master_packet_received_timer = threading.Timer(PACKET_RECEIVED_TIMEOUT, packet_received_timeout_handler, [packet_received_packet, PACKET_RECEIVED_ATTEMPTS])
+                    receiver_master_packet_received_timer.start()
 
     def receiver_master_listener():
         global receiver_master_fin_ack_timer
-        global output_file
+        global slave_file
         print("Listening to receiver master")
         while True:
             packet, address = intra_socket.recvfrom(PacketSize.RECEIVER_MASTER_TO_SLAVE)
@@ -86,12 +91,16 @@ if __name__ == '__main__':
             print("Packet received from receiver master, packet type {}".format(PacketType.translate(packet_type)))
             if packet_type == PacketType.SYN_ACK:
                 output_file = decoded_packet['output_file']
+                slave_file = output_file.split('.')[0] + '_' + slave_id + '.' + output_file.split('.')[1]
                 print("Joined receiver cluster, output file {}".format(output_file))
                 receiver_master_syn_ack_timer.cancel()
                 syn_ack_received_packet = { 'packet_type': PacketType.SYN_ACK_RECEIVED, 'slave_id': slave_id }
                 intra_socket.sendto(pickle.dumps(syn_ack_received_packet), address)
             elif packet_type == PacketType.PACKET_RECEIVED_ACK:
                 receiver_master_packet_received_timer.cancel()
+            elif packet_type == PacketType.PING:
+                ping_ack_packet = { 'packet_type': PacketType.PING_ACK, 'slave_id': slave_id }
+                intra_socket.sendto(pickle.dumps(ping_ack_packet), address)
             elif packet_type == PacketType.FIN:
                 fin_ack_packet = { 'packet_type': PacketType.FIN_ACK, 'slave_id': slave_id }
                 intra_socket.sendto(pickle.dumps(fin_ack_packet), address)

@@ -15,6 +15,7 @@ SLAVE_FIN_TIMEOUT = 3
 SENDER_FIN_TIMEOUT = 3
 RECEIVER_ADDRESSES_TIMEOUT = 3
 ACK_TIMEOUT = 3
+PING_TIMEOUT = 1
 
 SENDER_SYN_ACK_ATTEMPTS = 3
 SLAVE_SYN_ACK_ATTEMPTS = 3
@@ -22,8 +23,11 @@ SLAVE_FIN_ATTEMPTS = 3
 SENDER_FIN_ATTEMPTS = 3
 RECEIVER_ADDRESSES_ATTEMPTS = 3
 ACK_ATTEMPTS = 3
+PING_ATTEMPTS = 3
 
 ACK_SCHEDULER_DELAY = 3
+PING_SCHEDULER_DELAY = 5
+MAX_STALE_ATTEMPTS = 3
 
 if __name__ == '__main__':
 
@@ -46,20 +50,25 @@ if __name__ == '__main__':
     intra_socket.bind(('localhost', master_slave_port))
 
     slave_addresses = {}
-    inter_ports = []
+    slave_inter_ports = {}
     sender_master_address = None
     number_of_segments = None
 
     slave_syn_ack_timers = {}
     slave_fin_timers = {}
+    slave_ping_timers = {}
     sender_master_syn_ack_timer = None
     sender_master_receiver_addresses_timer = None
     sender_master_ack_timer = None
     sender_master_fin_timer = None
     ack_scheduler = sched.scheduler(time.time, time.sleep)
+    ping_scheduler = sched.scheduler(time.time, time.sleep)
 
     sequence_base = 0
-    received_sequence_numbers = set()
+    sequence_ceil = 0
+    stale_counter = 0
+    slave_received_sequences = {}
+    received_sequence_set = set()
 
     def sender_master_listener():
         global sender_master_address
@@ -75,7 +84,7 @@ if __name__ == '__main__':
                 print("Connected to sender master")
                 sender_master_address = address
                 number_of_segments = decoded_packet['number_of_segments']
-                syn_ack_packet = { 'packet_type': PacketType.SYN_ACK, 'slave_addresses': inter_ports }
+                syn_ack_packet = { 'packet_type': PacketType.SYN_ACK, 'slave_addresses': list(slave_inter_ports.values()) }
                 inter_socket.sendto(pickle.dumps(syn_ack_packet), address)
                 sender_master_syn_ack_timer = threading.Timer(SENDER_SYN_ACK_TIMEOUT, sender_syn_ack_timeout_handler, [syn_ack_packet, SENDER_SYN_ACK_ATTEMPTS])
                 sender_master_syn_ack_timer.start()
@@ -108,13 +117,14 @@ if __name__ == '__main__':
             if packet_type == PacketType.SYN:
                 slave_addresses[slave_id] = address
                 inter_port = decoded_packet['inter_port']
-                inter_ports.append(inter_port)
+                slave_inter_ports[slave_id] = inter_port
                 syn_ack_packet = { 'packet_type': PacketType.SYN_ACK, 'output_file': output_file }
                 intra_socket.sendto(pickle.dumps(syn_ack_packet), address)
                 print("Connected to receiver slave {}".format(slave_id))
                 # notice sender master about all available receiver slaves
                 if sender_master_address != None:
-                    print("Noticing sender master about all new slaves {}".format(inter_ports))
+                    inter_ports = list(slave_inter_ports.values())
+                    print("Noticing sender master about current available slaves {}".format(inter_ports))
                     receiver_addresses_packet = { 'packet_type': PacketType.RECEIVER_ADDRESSES, 'slave_addresses': inter_ports }
                     inter_socket.sendto(pickle.dumps(receiver_addresses_packet), sender_master_address)
                     sender_master_receiver_addresses_timer = threading.Timer(RECEIVER_ADDRESSES_TIMEOUT, receiver_addresses_timeout_handler, [receiver_addresses_packet, RECEIVER_ADDRESSES_ATTEMPTS])
@@ -126,10 +136,14 @@ if __name__ == '__main__':
                 slave_syn_ack_timers[slave_id].cancel()
             elif packet_type == PacketType.PACKET_RECEIVED:
                 sequence_number = decoded_packet['sequence_number']
+                received_sequences = decoded_packet['received_sequences']
                 print("Packet with sequence {} received from slave {}".format(sequence_number, slave_id))
-                received_sequence_numbers.add(sequence_number)
+                received_sequence_set.add(sequence_number)
+                slave_received_sequences[slave_id] = received_sequences
                 packet_received_ack_packet = { 'packet_type': PacketType.PACKET_RECEIVED_ACK }
                 intra_socket.sendto(pickle.dumps(packet_received_ack_packet), address)
+            elif packet_type == PacketType.PING_ACK and slave_id in slave_ping_timers:
+                slave_ping_timers[slave_id].cancel()
             elif packet_type == PacketType.FIN_ACK:
                 print("Slave {} terminated".format(slave_id))
                 slave_fin_timers[slave_id].cancel()
@@ -139,7 +153,9 @@ if __name__ == '__main__':
                     # finished termination with this slave, removing it from the list
                     slave_addresses.pop(slave_id)
                     if len(slave_addresses) == 0:
-                        print("All slaves are terminated, closing")
+                        print("All slaves are terminated, generate output file")
+                        generate_output_file()
+                        print("Output file generated, closing")
                         # all slaves and sender master is terminated, terminate receiver master here
                         terminate()
 
@@ -191,20 +207,55 @@ if __name__ == '__main__':
             sender_master_ack_timer = threading.Timer(ACK_TIMEOUT, ack_timeout_handler, [ack_packet, remaining_attempts - 1])
             sender_master_ack_timer.start()
     
+    def ping_timeout_handler(slave_id, ping_packet, slave_address, remaining_attempts):
+        if remaining_attempts > 0:
+            intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
+            slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, remaining_attempts - 1])
+            slave_ping_timers[slave_id].start()
+        else:
+            # slave down, removing from the list
+            slave_addresses.pop(slave_id)
+            slave_ping_timers.pop(slave_id)
+            slave_inter_ports.pop(slave_id)
+            inter_ports = list(slave_inter_ports.values())
+            print("Noticing sender master about current available slaves {}".format(inter_ports))
+            receiver_addresses_packet = { 'packet_type': PacketType.RECEIVER_ADDRESSES, 'slave_addresses': inter_ports }
+            inter_socket.sendto(pickle.dumps(receiver_addresses_packet), sender_master_address)
+            sender_master_receiver_addresses_timer = threading.Timer(RECEIVER_ADDRESSES_TIMEOUT, receiver_addresses_timeout_handler, [receiver_addresses_packet, RECEIVER_ADDRESSES_ATTEMPTS])
+            sender_master_receiver_addresses_timer.start()
+    
     def ack_schedule_event():
         global sender_master_ack_timer
         global sender_master_fin_timer
         global sequence_base
+        global sequence_ceil
+        global stale_counter
         print("Scheduled ack event")
         missing_sequence_numbers = []
         min_unack_sequence_number = number_of_segments
         if number_of_segments != None and sender_master_address != None and sequence_base < number_of_segments:
-            for i in range(sequence_base, number_of_segments):
-                if not i in received_sequence_numbers:
+            max_ack_sequence_number = sequence_ceil
+            for i in range(sequence_ceil, number_of_segments):
+                if i in received_sequence_set:
+                    max_ack_sequence_number = i
+            if sequence_ceil == max_ack_sequence_number:
+                # sequence_ceil has not been moved since last scheduled event
+                stale_counter += 1
+                if stale_counter >= MAX_STALE_ATTEMPTS:
+                    # at this point we think all packets from sequence_ceil to number_of_segments has been lost, adding them to missing sequence numbers
+                    for i in range(sequence_ceil + 1, number_of_segments):
+                        missing_sequence_numbers.append(i)
+            else:
+                # reset stale_counter
+                stale_counter = 0
+            sequence_ceil = max_ack_sequence_number
+            for i in range(sequence_ceil - 1, sequence_base - 1, -1):
+                if not i in received_sequence_set:
                     missing_sequence_numbers.append(i)
-                    min_unack_sequence_number = min(min_unack_sequence_number, i)
+                    min_unack_sequence_number = i
             sequence_base = min_unack_sequence_number
             print("Current sequence base {}".format(sequence_base))
+            print("Current sequence ceil {}".format(sequence_ceil))
             print("Current missing sequence numbers {}".format(missing_sequence_numbers))
             ack_packet = { 'packet_type': PacketType.ACK, 'missing_sequence_numbers': missing_sequence_numbers }
             inter_socket.sendto(pickle.dumps(ack_packet), sender_master_address)
@@ -229,6 +280,31 @@ if __name__ == '__main__':
             ack_scheduler.enter(ACK_SCHEDULER_DELAY, 1, ack_schedule_event)
             ack_scheduler.run()
 
+    def ping_schedule_event():
+        for slave_id, slave_address in slave_addresses.items():
+            ping_packet = { 'packet_type': PacketType.PING }
+            intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
+            slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
+            slave_ping_timers[slave_id].start()
+        ping_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
+        ping_scheduler.run()
+        
+
+    def generate_output_file():
+        packet_positions = [None] * number_of_segments
+        for slave_id, received_sequences in slave_received_sequences.items():
+            for i in range(0, len(received_sequences)):
+                sequence = received_sequences[i]
+                packet_positions[sequence] = (slave_id, i)
+        with open(output_file, 'w') as of:
+            for slave_id, index in packet_positions:
+                slave_file = output_file.split('.')[0] + '_' + slave_id + '.' + output_file.split('.')[1]
+                data = None
+                with open(slave_file) as sf:
+                    sf.seek(index * PacketSize.DATA_SEGMENT)
+                    data = sf.read(PacketSize.DATA_SEGMENT)
+                of.write(data)
+
     def terminate():
         # all slaves and receiver master is terminated, terminate sender master here
         inter_socket.close()
@@ -241,3 +317,5 @@ if __name__ == '__main__':
     sender_master_listener_thread.start()
     ack_scheduler.enter(ACK_SCHEDULER_DELAY, 1, ack_schedule_event)
     ack_scheduler.run()
+    ping_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
+    ping_scheduler.run()

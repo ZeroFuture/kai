@@ -23,10 +23,12 @@ class PacketType:
     DATA = 11
     ACK = 12
     ACK_RECEIVED = 13
+    PING = 14
+    PING_ACK = 15
 
     ALL_PACKET_TYPES = ['SYN', 'SYN_ACK', 'SYN_ACK_RECEIVED', 'FIN', 'FIN_ACK', 
     'FIN_ACK_RECEIVED', 'ASSIGN', 'RECEIVER_ADDRESSES', 'RECEIVER_ADDRESSES_ACK', 
-    'PACKET_RECEIVED', 'PACKET_RECEIVED_ACK', 'DATA', 'ACK', 'ACK_RECEIVED']
+    'PACKET_RECEIVED', 'PACKET_RECEIVED_ACK', 'DATA', 'ACK', 'ACK_RECEIVED', 'PING', 'PING_ACK']
 
     @staticmethod
     def translate(packet_type):
