@@ -6,6 +6,7 @@ import pickle
 import math
 import sched
 import time
+import copy
 from socket import *
 from AtomicUtils import *
 from PacketUtils import *
@@ -23,6 +24,8 @@ FIN_ACK_ATTEMPTS = 3
 PING_ATTEMPTS = 3
 
 PING_SCHEDULER_DELAY = 5
+
+WAIT_SLAVES_DELAY = 1
 
 if __name__ == '__main__':
     
@@ -59,20 +62,23 @@ if __name__ == '__main__':
     number_of_segments = math.ceil(file_size / PacketSize.DATA_SEGMENT)
     is_receiver_terminated = AtomicBoolean(False)
 
-    ping_scheduler = sched.scheduler(time.time, time.sleep)
+    event_scheduler = sched.scheduler(time.time, time.sleep)
+
+    is_terminated = AtomicBoolean(False)
 
     def connect_to_receiver_master():
         global receiver_master_syn_timer
         # three-way handshake to establish connection with receiver master
         print("Connecting to receiver master")
         syn_packet = { 'packet_type': PacketType.SYN, 'number_of_segments': number_of_segments }
-        inter_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
         receiver_master_syn_timer = threading.Timer(SYN_TIMEOUT, syn_timeout_handler, [syn_packet, SYN_ATTEMPTS])
         receiver_master_syn_timer.start()
+        inter_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
 
     def assign_sequence_numbers(sequence_numbers):
         for sequence_number in sequence_numbers:
             is_packet_assigned = False
+            print("Assigning packet sequence {}".format(sequence_number))
             while not is_packet_assigned:
                 if len(slave_addresses) > 0 and len(receiver_slave_addresses) > 0:
                     # randomly choose a slave to assign this sequence_number
@@ -83,10 +89,13 @@ if __name__ == '__main__':
                     assign_packet = { 'packet_type': PacketType.ASSIGN, 'sequence_number': sequence_number, 'receiver_slave_address': receiver_slave_address }
                     intra_socket.sendto(pickle.dumps(assign_packet), slave_address)
                     is_packet_assigned = True
+                else:
+                    print("Waiting for receiver slaves and sender slaves to join")
+                    time.sleep(WAIT_SLAVES_DELAY)
 
     def sender_slave_listener():
         print("Listening to sender slaves")
-        while True:
+        while not is_terminated.get():
             packet, address = intra_socket.recvfrom(PacketSize.SENDER_SLAVE_TO_MASTER)
             decoded_packet = pickle.loads(packet)
             slave_id = decoded_packet['slave_id']
@@ -95,32 +104,39 @@ if __name__ == '__main__':
             if packet_type == PacketType.SYN:
                 slave_addresses[slave_id] = address
                 syn_ack_packet = { 'packet_type': PacketType.SYN_ACK, 'input_file': input_file }
-                intra_socket.sendto(pickle.dumps(syn_ack_packet), address)
-                print("slave {} joined cluster".format(slave_id))
                 if not slave_id in slave_syn_ack_timers:
                     slave_syn_ack_timers[slave_id] = threading.Timer(SYN_ACK_TIMEOUT, syn_ack_timeout_handler, [slave_id, syn_ack_packet, address, SYN_ACK_ATTEMPTS])
                     slave_syn_ack_timers[slave_id].start()
+                intra_socket.sendto(pickle.dumps(syn_ack_packet), address)
+                print("slave {} joined cluster".format(slave_id))
             elif packet_type == PacketType.SYN_ACK_RECEIVED:
                 slave_syn_ack_timers[slave_id].cancel()
             elif packet_type == PacketType.PING_ACK and slave_id in slave_ping_timers:
                 slave_ping_timers[slave_id].cancel()
             elif packet_type == PacketType.FIN_ACK:
                 slave_fin_timers[slave_id].cancel()
+                slave_ping_timers[slave_id].cancel()
                 fin_ack_received_packet = { 'packet_type': PacketType.FIN_ACK_RECEIVED }
                 intra_socket.sendto(pickle.dumps(fin_ack_received_packet), address)
+                if slave_id in slave_fin_timers:
+                    slave_fin_timers[slave_id].cancel()
+                if slave_id in slave_ping_timers:
+                    slave_ping_timers[slave_id].cancel()
                 if slave_id in slave_addresses:
+                    print("Slave {} terminated".format(slave_id))
                     # finished termination with this slave, removing it from the list
                     slave_addresses.pop(slave_id)
                     if len(slave_addresses) == 0 and is_receiver_terminated.get():
                         print("All sender slaves and receiver master are terminated, closing")
                         # all slaves and receiver master is terminated, terminate sender master here
-                        terminate()
+                        is_terminated.set(True)
+        intra_socket.close()
 
     def receiver_master_listener():
         global receiver_slave_addresses
         global receiver_master_fin_ack_timer
         print("Listening to receiver master")
-        while True:
+        while not is_terminated.get():
             packet, address = inter_socket.recvfrom(PacketSize.RECEIVER_MASTER_TO_SENDER)
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
@@ -150,63 +166,75 @@ if __name__ == '__main__':
                 # four-way termination
                 # merge FIN and ACK to one packet because the sender has no more data to sent at this point
                 fin_ack_packet = { 'packet_type': PacketType.FIN_ACK }
-                inter_socket.sendto(pickle.dumps(fin_ack_packet), address)
                 receiver_master_fin_ack_timer = threading.Timer(FIN_ACK_TIMEOUT, fin_ack_timeout_handler, [fin_ack_packet, FIN_ACK_ATTEMPTS])
                 receiver_master_fin_ack_timer.start()
+                inter_socket.sendto(pickle.dumps(fin_ack_packet), address)
                 # asking all sender slaves to terminate
                 fin_packet = { 'packet_type': PacketType.FIN }
-                for slave_id, slave_address in slave_addresses.items():
-                    intra_socket.sendto(pickle.dumps(fin_packet), slave_address)
-                    print("Noticing slave {} to terminate".format(slave_id))
+                slave_addresses_copy = copy.deepcopy(slave_addresses)
+                for slave_id, slave_address in slave_addresses_copy.items():
                     slave_fin_timers[slave_id] = threading.Timer(FIN_TIMEOUT, fin_timeout_handler, [slave_id, fin_packet, slave_address, FIN_ATTEMPTS])
                     slave_fin_timers[slave_id].start()
+                    intra_socket.sendto(pickle.dumps(fin_packet), slave_address)
+                    print("Noticing slave {} to terminate".format(slave_id))
             elif packet_type == PacketType.FIN_ACK_RECEIVED:
                 # receiver master successfully terminated
                 print("Receiver master successfully terminated")
                 receiver_master_fin_ack_timer.cancel()
                 is_receiver_terminated.set(True)
                 if len(slave_addresses) == 0:
-                    terminate()
+                    is_terminated.set(True)
+        inter_socket.close()
 
     def syn_timeout_handler(syn_packet, remaining_attempts):
+        if is_terminated.get():
+            return
         global receiver_master_syn_timer
         if remaining_attempts > 0:
             print("SYN timeout, retry left {}".format(remaining_attempts))
-            inter_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
             receiver_master_syn_timer = threading.Timer(SYN_TIMEOUT, syn_timeout_handler, [syn_packet, remaining_attempts - 1])
             receiver_master_syn_timer.start()
+            inter_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
 
     def syn_ack_timeout_handler(slave_id, syn_ack_packet, slave_address, remaining_attempts):
+        if is_terminated.get():
+            return
         # recursively resend the syn_ack packet until no remaining attempts left we we assume that slave is down
         if remaining_attempts > 0:
             print("SYN_ACK timeout on slave {}, retry left {}".format(slave_id, remaining_attempts))
-            intra_socket.sendto(pickle.dumps(syn_ack_packet), slave_address)
             slave_syn_ack_timers[slave_id] = threading.Timer(SYN_ACK_TIMEOUT, syn_ack_timeout_handler, [slave_id, syn_ack_packet, slave_address, remaining_attempts - 1])
             slave_syn_ack_timers[slave_id].start()
+            intra_socket.sendto(pickle.dumps(syn_ack_packet), slave_address)
 
     def fin_timeout_handler(slave_id, fin_packet, slave_address, remaining_attempts):
+        if is_terminated.get():
+            return
         # recursively resend the fin packet until no remaining attempts left we we assume that slave is down
         if remaining_attempts > 0:
             print("FIN timeout on slave {}, retry left {}".format(slave_id, remaining_attempts))
-            intra_socket.sendto(pickle.dumps(fin_packet), slave_address)
             slave_fin_timers[slave_id] = threading.Timer(FIN_TIMEOUT, fin_timeout_handler, [slave_id, fin_packet, slave_address, remaining_attempts - 1])
             slave_fin_timers[slave_id].start()
+            intra_socket.sendto(pickle.dumps(fin_packet), slave_address)
 
     def fin_ack_timeout_handler(fin_ack_packet, remaining_attempts):
+        if is_terminated.get():
+            return
         global receiver_master_fin_ack_timer
         # recursively resend the fin_ack packet until no remaining attempts left we we assume that receiver master is down
         if remaining_attempts > 0:
             print("FIN_ACK timeout, retry left {}".format(remaining_attempts))
-            inter_socket.sendto(pickle.dumps(fin_ack_packet), receiver_master_address)
             receiver_master_fin_ack_timer = threading.Timer(FIN_ACK_TIMEOUT, fin_ack_timeout_handler, [fin_ack_packet, remaining_attempts - 1])
             receiver_master_fin_ack_timer.start()
+            inter_socket.sendto(pickle.dumps(fin_ack_packet), receiver_master_address)
 
     def ping_timeout_handler(slave_id, ping_packet, slave_address, remaining_attempts):
+        if is_terminated.get() or not slave_id in slave_addresses:
+            return
         if remaining_attempts > 0:
             print("PING timeout, retry left {}".format(remaining_attempts))
-            intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
             slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, remaining_attempts - 1])
             slave_ping_timers[slave_id].start()
+            intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
         else:
             # slave down, removing from the list
             print("Slave {} down, health check reached max attempts".format(slave_id))
@@ -214,25 +242,22 @@ if __name__ == '__main__':
             slave_ping_timers.pop(slave_id)
 
     def ping_schedule_event():
-        for slave_id, slave_address in slave_addresses.items():
+        if is_terminated.get():
+            return
+        slave_addresses_copy = copy.deepcopy(slave_addresses)
+        for slave_id, slave_address in slave_addresses_copy.items():
             ping_packet = { 'packet_type': PacketType.PING }
-            intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
             slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
             slave_ping_timers[slave_id].start()
-        ping_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
-        ping_scheduler.run()
-
-    def terminate():
-        # all slaves and receiver master is terminated, terminate sender master here
-        inter_socket.close()
-        intra_socket.close()
-        os._exit(1)
+            intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
+        event_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
+        event_scheduler.run()
 
     connect_to_receiver_master()
     slaves_listener_thread = threading.Thread(target=sender_slave_listener)
     receiver_master_listener_thread = threading.Thread(target=receiver_master_listener)
     slaves_listener_thread.start()
     receiver_master_listener_thread.start()
-    ping_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
-    ping_scheduler.run()
     assign_sequence_numbers(list(range(0, number_of_segments)))
+    event_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
+    event_scheduler.run()

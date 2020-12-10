@@ -14,12 +14,7 @@ class AtomicBoolean(object):
             self.lock.release()
 
     def get(self):
-        self.lock.acquire()
-        try:
-            res = self.value
-        finally:
-            self.lock.release()
-        return res
+        return self.value
 
     def set(self, new_state):
         self.lock.acquire()

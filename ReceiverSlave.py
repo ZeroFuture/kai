@@ -10,11 +10,9 @@ from PacketUtils import *
 
 SYN_ACK_TIMEOUT = 3
 FIN_ACK_TIMEOUT = 3
-PACKET_RECEIVED_TIMEOUT = 3
 
 SYN_ACK_ATTEMPTS = 3
 FIN_ACK_ATTEMPTS = 3
-PACKET_RECEIVED_ATTEMPTS = 3
 
 if __name__ == '__main__':
 
@@ -41,25 +39,25 @@ if __name__ == '__main__':
 
     receiver_master_syn_ack_timer = None
     receiver_master_fin_ack_timer = None
-    receiver_master_packet_received_timer = None
     received_sequences = []
     received_sequence_set = set()
 
     slave_id = str(uuid.uuid1())
     print("Slave ID {}".format(slave_id))
 
+    is_terminated = AtomicBoolean(False)
+
     def join_cluster():
         global receiver_master_syn_ack_timer
         syn_packet = { 'packet_type': PacketType.SYN, 'slave_id': slave_id, 'inter_port': ('localhost', slave_slave_port) }
-        intra_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
-        print("Joining receiver cluster")
         receiver_master_syn_ack_timer = threading.Timer(SYN_ACK_TIMEOUT, syn_timeout_handler, [syn_packet, SYN_ACK_ATTEMPTS])
         receiver_master_syn_ack_timer.start()
+        intra_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
+        print("Joining receiver cluster")
 
     def sender_slave_listener():
-        global receiver_master_packet_received_timer
         print("Listening to sender slave")
-        while True:
+        while not is_terminated.get():
             packet, address = inter_socket.recvfrom(PacketSize.SENDER_SLAVE_TO_RECEIVER)
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
@@ -71,20 +69,16 @@ if __name__ == '__main__':
                     received_sequences.append(sequence_number)
                     received_sequence_set.add(sequence_number)
                     data = decoded_packet['data']
-                    with open(slave_file, 'w') as f:
+                    with open(slave_file, 'a') as f:
                         f.write(data)
                     print("Data with sequence {} received and write to temp file".format(sequence_number))
-                    print("Noticing receiver master received packet with {}".format(sequence_number))
-                    packet_received_packet = { 'packet_type': PacketType.PACKET_RECEIVED, 'slave_id': slave_id, 'sequence_number': sequence_number, 'received_sequences': received_sequences }
-                    intra_socket.sendto(pickle.dumps(packet_received_packet), receiver_master_address)
-                    receiver_master_packet_received_timer = threading.Timer(PACKET_RECEIVED_TIMEOUT, packet_received_timeout_handler, [packet_received_packet, PACKET_RECEIVED_ATTEMPTS])
-                    receiver_master_packet_received_timer.start()
+        inter_socket.close()
 
     def receiver_master_listener():
         global receiver_master_fin_ack_timer
         global slave_file
         print("Listening to receiver master")
-        while True:
+        while not is_terminated.get():
             packet, address = intra_socket.recvfrom(PacketSize.RECEIVER_MASTER_TO_SLAVE)
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
@@ -96,49 +90,39 @@ if __name__ == '__main__':
                 receiver_master_syn_ack_timer.cancel()
                 syn_ack_received_packet = { 'packet_type': PacketType.SYN_ACK_RECEIVED, 'slave_id': slave_id }
                 intra_socket.sendto(pickle.dumps(syn_ack_received_packet), address)
-            elif packet_type == PacketType.PACKET_RECEIVED_ACK:
-                receiver_master_packet_received_timer.cancel()
             elif packet_type == PacketType.PING:
-                ping_ack_packet = { 'packet_type': PacketType.PING_ACK, 'slave_id': slave_id }
+                ping_ack_packet = { 'packet_type': PacketType.PING_ACK, 'slave_id': slave_id, 'received_sequences': list(received_sequence_set) }
                 intra_socket.sendto(pickle.dumps(ping_ack_packet), address)
             elif packet_type == PacketType.FIN:
                 fin_ack_packet = { 'packet_type': PacketType.FIN_ACK, 'slave_id': slave_id }
-                intra_socket.sendto(pickle.dumps(fin_ack_packet), address)
                 receiver_master_fin_ack_timer = threading.Timer(FIN_ACK_TIMEOUT, fin_ack_timeout_handler, [fin_ack_packet, FIN_ACK_ATTEMPTS])
                 receiver_master_fin_ack_timer.start()
+                intra_socket.sendto(pickle.dumps(fin_ack_packet), address)
             elif packet_type == PacketType.FIN_ACK_RECEIVED:
                 print("Termination completed, closing")
                 receiver_master_fin_ack_timer.cancel()
-                terminate()
+                is_terminated.set(True)
+        intra_socket.close()
 
     def syn_timeout_handler(syn_packet, remaining_attempts):
+        if is_terminated.get():
+            return
         global receiver_master_syn_ack_timer
         if remaining_attempts > 0:
             print("SYN timeout, attempts left {}".format(remaining_attempts))
-            intra_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
             receiver_master_syn_ack_timer = threading.Timer(SYN_ACK_TIMEOUT, syn_timeout_handler, [syn_packet, remaining_attempts - 1])
             receiver_master_syn_ack_timer.start()
-
-    def packet_received_timeout_handler(packet_received_packet, remaining_attempts):
-        global receiver_master_packet_received_timer
-        if remaining_attempts > 0:
-            print("PACKET_RECEIVED timeout, attempts left {}".format(remaining_attempts))
-            intra_socket.sendto(pickle.dumps(packet_received_packet), receiver_master_address)
-            receiver_master_packet_received_timer = threading.Timer(PACKET_RECEIVED_TIMEOUT, packet_received_timeout_handler, [packet_received_packet, remaining_attempts - 1])
-            receiver_master_packet_received_timer.start()
+            intra_socket.sendto(pickle.dumps(syn_packet), receiver_master_address)
     
     def fin_ack_timeout_handler(fin_ack_packet, remaining_attempts):
+        if is_terminated.get():
+            return
         global receiver_master_fin_ack_timer
         if remaining_attempts > 0:
             print("FIN_ACK timeout, attempts left {}".format(remaining_attempts))
-            intra_socket.sendto(pickle.dumps(fin_ack_packet), receiver_master_address)
             receiver_master_fin_ack_timer = threading.Timer(FIN_ACK_TIMEOUT, fin_ack_timeout_handler, [fin_ack_packet, remaining_attempts - 1])
             receiver_master_fin_ack_timer.start()
-
-    def terminate():
-        inter_socket.close()
-        intra_socket.close()
-        os._exit(1)
+            intra_socket.sendto(pickle.dumps(fin_ack_packet), receiver_master_address)
 
     join_cluster()
     receiver_master_listen_thread = threading.Thread(target=receiver_master_listener)
