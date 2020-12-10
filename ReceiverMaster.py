@@ -260,7 +260,7 @@ if __name__ == '__main__':
                 max_ack_sequence_number = sequence_ceil
                 for i in range(sequence_ceil, number_of_segments):
                     if i in received_sequence_set:
-                        max_ack_sequence_number = max(max_ack_sequence_number, i)
+                        max_ack_sequence_number = i
                 if sequence_ceil == max_ack_sequence_number and sequence_ceil != -1:
                     # sequence_ceil has not been moved since last scheduled event
                     stale_counter += 1
@@ -273,10 +273,10 @@ if __name__ == '__main__':
                     stale_counter = 0
                 sequence_ceil = max_ack_sequence_number
                 if sequence_ceil > sequence_base:
-                    for i in range(sequence_base, sequence_ceil + 1):
+                    for i in range(sequence_ceil, sequence_base - 1, -1):
                         if not i in received_sequence_set:
                             missing_sequence_numbers.append(i)
-                            min_unack_sequence_number = min(min_unack_sequence_number, i)
+                            min_unack_sequence_number = i
                     sequence_base = min_unack_sequence_number
                 else:
                     sequence_base = sequence_ceil + 1
