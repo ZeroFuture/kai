@@ -2,7 +2,6 @@ import sys
 import threading
 import random
 import os
-import sched
 import time
 import pickle
 import copy
@@ -24,10 +23,11 @@ SLAVE_FIN_ATTEMPTS = 3
 SENDER_FIN_ATTEMPTS = 3
 RECEIVER_ADDRESSES_ATTEMPTS = 3
 ACK_ATTEMPTS = 3
-PING_ATTEMPTS = 3
+PING_ATTEMPTS = 0
 
 ACK_SCHEDULER_DELAY = 5
-PING_SCHEDULER_DELAY = 5
+PING_SCHEDULER_DELAY = 1
+TERMINATION_SCHEDULER_DELAY = 5
 MAX_STALE_ATTEMPTS = 3
 
 if __name__ == '__main__':
@@ -62,7 +62,6 @@ if __name__ == '__main__':
     sender_master_receiver_addresses_timer = None
     sender_master_ack_timer = None
     sender_master_fin_timer = None
-    event_scheduler = sched.scheduler(time.time, time.sleep)
 
     sequence_base = 0
     sequence_ceil = -1
@@ -139,9 +138,11 @@ if __name__ == '__main__':
             elif packet_type == PacketType.SYN_ACK_RECEIVED:
                 slave_syn_ack_timers[slave_id].cancel()
             elif packet_type == PacketType.PING_ACK and slave_id in slave_ping_timers:
-                received_sequences = decoded_packet['received_sequences']
-                slave_received_sequences[slave_id] = received_sequences
-                for sequence in received_sequences:
+                new_received_sequences = decoded_packet['new_received_sequences']
+                if not slave_id in slave_received_sequences:
+                    slave_received_sequences[slave_id] = []
+                for sequence in new_received_sequences:
+                    slave_received_sequences[slave_id].append(sequence)
                     received_sequence_set.add(sequence)
                 slave_ping_timers[slave_id].cancel()
             elif packet_type == PacketType.FIN_ACK:
@@ -246,78 +247,76 @@ if __name__ == '__main__':
             inter_socket.sendto(pickle.dumps(receiver_addresses_packet), sender_master_address)
     
     def ack_schedule_event():
-        if is_terminated.get():
-            return
         global sender_master_ack_timer
         global sender_master_fin_timer
         global sequence_base
         global sequence_ceil
         global stale_counter
-        print("Scheduled ack event")
-        missing_sequence_numbers = []
-        min_unack_sequence_number = number_of_segments
-        if number_of_segments != None and sender_master_address != None and sequence_base < number_of_segments:
-            max_ack_sequence_number = sequence_ceil
-            for i in range(sequence_ceil, number_of_segments):
-                if i in received_sequence_set:
-                    max_ack_sequence_number = i
-            if sequence_ceil == max_ack_sequence_number and sequence_ceil != -1:
-                # sequence_ceil has not been moved since last scheduled event
-                stale_counter += 1
-                if stale_counter >= MAX_STALE_ATTEMPTS:
-                    # at this point we think all packets from sequence_ceil to number_of_segments has been lost, adding them to missing sequence numbers
-                    for i in range(sequence_ceil + 1, number_of_segments):
-                        missing_sequence_numbers.append(i)
-            else:
-                # reset stale_counter
-                stale_counter = 0
-            sequence_ceil = max_ack_sequence_number
-            if sequence_ceil > sequence_base:
-                for i in range(sequence_ceil, sequence_base - 1, -1):
-                    if not i in received_sequence_set:
-                        missing_sequence_numbers.append(i)
-                        min_unack_sequence_number = i
-                sequence_base = min_unack_sequence_number
-            else:
-                sequence_base = sequence_ceil + 1
-            print("Current sequence base {}".format(sequence_base))
-            print("Current sequence ceil {}".format(sequence_ceil))
-            print("Current missing sequence numbers {}".format(missing_sequence_numbers))
-            if sender_master_ack_timer != None:
-                # terminate previously unsent ack packet, sending the updated one
-                sender_master_ack_timer.cancel()
-            ack_packet = { 'packet_type': PacketType.ACK, 'missing_sequence_numbers': missing_sequence_numbers }
-            sender_master_ack_timer = threading.Timer(ACK_TIMEOUT, ack_timeout_handler, [ack_packet, ACK_ATTEMPTS])
-            sender_master_ack_timer.start()
-            inter_socket.sendto(pickle.dumps(ack_packet), sender_master_address)
-            print("Cumulated ACK packet sent")
-            if sequence_base == number_of_segments:
-                print("All packets received, start termination")
-                fin_packet = { 'packet_type': PacketType.FIN }
-                sender_master_fin_timer = threading.Timer(SENDER_FIN_TIMEOUT, sender_fin_timeout_handler, [fin_packet, SENDER_FIN_ATTEMPTS])
-                sender_master_fin_timer.start()
-                inter_socket.sendto(pickle.dumps(fin_packet), sender_master_address)
-            elif not is_terminated.get():
-                # set up for next scheduler
-                event_scheduler.enter(ACK_SCHEDULER_DELAY, 1, ack_schedule_event)
-                event_scheduler.run()
-        elif not is_terminated.get():
-            # set up for next scheduler
-            event_scheduler.enter(ACK_SCHEDULER_DELAY, 1, ack_schedule_event)
-            event_scheduler.run()
+        while not is_terminated.get():
+            print("Scheduled ack event")
+            missing_sequence_numbers = []
+            min_unack_sequence_number = number_of_segments
+            if number_of_segments != None and sender_master_address != None and sequence_base < number_of_segments:
+                max_ack_sequence_number = sequence_ceil
+                for i in range(sequence_ceil, number_of_segments):
+                    if i in received_sequence_set:
+                        max_ack_sequence_number = i
+                if sequence_ceil == max_ack_sequence_number and sequence_ceil != -1:
+                    # sequence_ceil has not been moved since last scheduled event
+                    stale_counter += 1
+                    if stale_counter >= MAX_STALE_ATTEMPTS:
+                        # at this point we think all packets from sequence_ceil to number_of_segments has been lost, adding them to missing sequence numbers
+                        for i in range(sequence_ceil + 1, number_of_segments):
+                            missing_sequence_numbers.append(i)
+                else:
+                    # reset stale_counter
+                    stale_counter = 0
+                sequence_ceil = max_ack_sequence_number
+                if sequence_ceil > sequence_base:
+                    for i in range(sequence_ceil, sequence_base - 1, -1):
+                        if not i in received_sequence_set:
+                            missing_sequence_numbers.append(i)
+                            min_unack_sequence_number = i
+                    sequence_base = min_unack_sequence_number
+                else:
+                    sequence_base = sequence_ceil + 1
+                print("Current sequence base {}".format(sequence_base))
+                print("Current sequence ceil {}".format(sequence_ceil))
+                print("Current missing sequence numbers {}".format(missing_sequence_numbers))
+                if sender_master_ack_timer != None:
+                    # terminate previously unsent ack packet, sending the updated one
+                    sender_master_ack_timer.cancel()
+                ack_packet = { 'packet_type': PacketType.ACK, 'missing_sequence_numbers': missing_sequence_numbers }
+                sender_master_ack_timer = threading.Timer(ACK_TIMEOUT, ack_timeout_handler, [ack_packet, ACK_ATTEMPTS])
+                sender_master_ack_timer.start()
+                inter_socket.sendto(pickle.dumps(ack_packet), sender_master_address)
+                print("Cumulated ACK packet sent")
+                if sequence_base == number_of_segments:
+                    print("All packets received, start termination")
+                    fin_packet = { 'packet_type': PacketType.FIN }
+                    sender_master_fin_timer = threading.Timer(SENDER_FIN_TIMEOUT, sender_fin_timeout_handler, [fin_packet, SENDER_FIN_ATTEMPTS])
+                    sender_master_fin_timer.start()
+                    inter_socket.sendto(pickle.dumps(fin_packet), sender_master_address)
+            time.sleep(ACK_SCHEDULER_DELAY)
 
     def ping_schedule_event():
-        if is_terminated.get():
-            return
-        slave_addresses_copy = copy.deepcopy(slave_addresses)
-        for slave_id, slave_address in slave_addresses_copy.items():
-            ping_packet = { 'packet_type': PacketType.PING }
-            slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
-            slave_ping_timers[slave_id].start()
-            intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
-        if not is_terminated.get():
-            event_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
-            event_scheduler.run()
+        while not is_terminated.get():
+            slave_addresses_copy = copy.deepcopy(slave_addresses)
+            for slave_id, slave_address in slave_addresses_copy.items():
+                last_received_sequences_size = 0
+                if slave_id in slave_received_sequences:
+                    last_received_sequences_size = len(slave_received_sequences[slave_id])
+                ping_packet = { 'packet_type': PacketType.PING, 'last_received_sequences_size': last_received_sequences_size }
+                slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
+                slave_ping_timers[slave_id].start()
+                intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
+            time.sleep(PING_SCHEDULER_DELAY)
+    
+    def termination_schedule_event():
+        while True:
+            if is_terminated.get():
+                os._exit(0)
+            time.sleep(TERMINATION_SCHEDULER_DELAY)
 
     def generate_output_file():
         packet_positions = [None] * number_of_segments
@@ -333,11 +332,18 @@ if __name__ == '__main__':
                     sf.seek(index * PacketSize.DATA_SEGMENT)
                     data = sf.read(PacketSize.DATA_SEGMENT)
                 of.write(data)
+        # clean temp file
+        for slave_id in slave_received_sequences:
+            slave_file = output_file.split('.')[0] + '_' + slave_id + '.' + output_file.split('.')[1]
+            os.remove(slave_file)
 
     slaves_listener_thread = threading.Thread(target=receiver_slave_listener)
     sender_master_listener_thread = threading.Thread(target=sender_master_listener)
+    ping_schedule_thread = threading.Thread(target=ping_schedule_event)
+    ack_schedule_thread = threading.Thread(target=ack_schedule_event)
+    termination_schedule_thread = threading.Thread(target=termination_schedule_event)
     slaves_listener_thread.start()
     sender_master_listener_thread.start()
-    event_scheduler.enter(ACK_SCHEDULER_DELAY, 1, ack_schedule_event)
-    event_scheduler.enter(PING_SCHEDULER_DELAY, 2, ping_schedule_event)
-    event_scheduler.run()
+    ping_schedule_thread.start()
+    ack_schedule_thread.start()
+    termination_schedule_thread.start()

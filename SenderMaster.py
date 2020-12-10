@@ -4,7 +4,6 @@ import random
 import os
 import pickle
 import math
-import sched
 import time
 import copy
 from socket import *
@@ -21,11 +20,11 @@ SYN_ATTEMPTS = 3
 SYN_ACK_ATTEMPTS = 3
 FIN_ATTEMPTS = 3
 FIN_ACK_ATTEMPTS = 3
-PING_ATTEMPTS = 3
+PING_ATTEMPTS = 0
 
-PING_SCHEDULER_DELAY = 5
-
+PING_SCHEDULER_DELAY = 1
 WAIT_SLAVES_DELAY = 1
+TERMINATION_SCHEDULER_DELAY = 5
 
 if __name__ == '__main__':
     
@@ -61,8 +60,6 @@ if __name__ == '__main__':
     file_size = os.stat(input_file).st_size
     number_of_segments = math.ceil(file_size / PacketSize.DATA_SEGMENT)
     is_receiver_terminated = AtomicBoolean(False)
-
-    event_scheduler = sched.scheduler(time.time, time.sleep)
 
     is_terminated = AtomicBoolean(False)
 
@@ -242,22 +239,28 @@ if __name__ == '__main__':
             slave_ping_timers.pop(slave_id)
 
     def ping_schedule_event():
-        if is_terminated.get():
-            return
-        slave_addresses_copy = copy.deepcopy(slave_addresses)
-        for slave_id, slave_address in slave_addresses_copy.items():
-            ping_packet = { 'packet_type': PacketType.PING }
-            slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
-            slave_ping_timers[slave_id].start()
-            intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
-        event_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
-        event_scheduler.run()
+        while not is_terminated.get():
+            slave_addresses_copy = copy.deepcopy(slave_addresses)
+            for slave_id, slave_address in slave_addresses_copy.items():
+                ping_packet = { 'packet_type': PacketType.PING }
+                slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
+                slave_ping_timers[slave_id].start()
+                intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
+            time.sleep(PING_SCHEDULER_DELAY)
+    
+    def termination_schedule_event():
+        while True:
+            if is_terminated.get():
+                os._exit(0)
+            time.sleep(TERMINATION_SCHEDULER_DELAY)
 
     connect_to_receiver_master()
     slaves_listener_thread = threading.Thread(target=sender_slave_listener)
     receiver_master_listener_thread = threading.Thread(target=receiver_master_listener)
+    ping_schedule_thread = threading.Thread(target=ping_schedule_event)
+    termination_schedule_thread = threading.Thread(target=termination_schedule_event)
     slaves_listener_thread.start()
     receiver_master_listener_thread.start()
+    ping_schedule_thread.start()
+    termination_schedule_thread.start()
     assign_sequence_numbers(list(range(0, number_of_segments)))
-    event_scheduler.enter(PING_SCHEDULER_DELAY, 1, ping_schedule_event)
-    event_scheduler.run()

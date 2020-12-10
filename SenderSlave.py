@@ -14,6 +14,8 @@ FIN_ACK_TIMEOUT = 3
 SYN_ATTEMPTS = 3
 FIN_ACK_ATTEMPTS = 3
 
+TERMINATION_SCHEDULER_DELAY = 5
+
 if __name__ == '__main__':
 
     if len(sys.argv) != 5:
@@ -116,6 +118,14 @@ if __name__ == '__main__':
             sender_master_fin_ack_timer.start()
             intra_socket.sendto(pickle.dumps(fin_ack_packet), sender_master_address)
 
+    def termination_schedule_event():
+        while True:
+            if is_terminated.get():
+                os._exit(0)
+            time.sleep(TERMINATION_SCHEDULER_DELAY)
+
     join_cluster()
     sender_master_listen_thread = threading.Thread(target=sender_master_listener)
+    termination_schedule_thread = threading.Thread(target=termination_schedule_event)
     sender_master_listen_thread.start()
+    termination_schedule_thread.start()
