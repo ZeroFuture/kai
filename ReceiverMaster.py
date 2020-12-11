@@ -25,12 +25,13 @@ RECEIVER_ADDRESSES_ATTEMPTS = 3
 ACK_ATTEMPTS = 3
 PING_ATTEMPTS = 5
 
-ACK_SCHEDULER_DELAY = 5
+ACK_SCHEDULER_DELAY = 2
 PING_SCHEDULER_DELAY = 1
 TERMINATION_SCHEDULER_DELAY = 5
 MAX_STALE_ATTEMPTS = 3
 STALE_ACTIVATE_THRESHOLD = 30
-MAX_MISSING_SEQUENCES_LEN = 250
+
+MAX_MISSING_SEQUENCES_LEN = 1000
 
 RANDOM_DROP_PROB = 0.0
 
@@ -263,7 +264,7 @@ if __name__ == '__main__':
         while not is_terminated.get():
             print("Scheduled ack event")
             missing_sequence_numbers = []
-            min_unack_sequence_number = number_of_segments
+            min_unack_sequence_number = sequence_ceil + 1
             if number_of_segments != None and sender_master_address != None and sequence_base < number_of_segments:
                 max_ack_sequence_number = sequence_ceil
                 for i in range(sequence_ceil, number_of_segments):
@@ -333,12 +334,12 @@ if __name__ == '__main__':
             time.sleep(TERMINATION_SCHEDULER_DELAY)
 
     def generate_output_file():
-        packet_positions = [None] * number_of_segments
         try:
             os.remove(output_file)
             print("Deleted original file")
         except Exception:
             print("New file")
+        packet_positions = [None] * number_of_segments
         for slave_id, received_sequences in slave_received_sequences.items():
             for i in range(0, len(received_sequences)):
                 sequence = received_sequences[i]

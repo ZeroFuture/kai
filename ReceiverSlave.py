@@ -17,6 +17,8 @@ FIN_ACK_ATTEMPTS = 3
 
 TERMINATION_SCHEDULER_DELAY = 5
 
+MAX_NEW_RECEIVED_PACKETS_LEN = 1000
+
 RANDOM_DROP_PROB = 0.0
 
 if __name__ == '__main__':
@@ -101,7 +103,7 @@ if __name__ == '__main__':
                 intra_socket.sendto(pickle.dumps(syn_ack_received_packet), address)
             elif packet_type == PacketType.PING:
                 last_received_sequences_size = decoded_packet['last_received_sequences_size']
-                new_received_sequences = received_sequences[last_received_sequences_size:]
+                new_received_sequences = received_sequences[last_received_sequences_size:last_received_sequences_size + MAX_NEW_RECEIVED_PACKETS_LEN]
                 print("Newly received sequences since last PING_ACK sent {}".format(new_received_sequences))
                 ping_ack_packet = { 'packet_type': PacketType.PING_ACK, 'slave_id': slave_id, 'new_received_sequences': new_received_sequences }
                 intra_socket.sendto(pickle.dumps(ping_ack_packet), address)
