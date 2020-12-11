@@ -4,6 +4,7 @@ import time
 import os
 import uuid
 import pickle
+import random
 from socket import *
 from AtomicUtils import *
 from PacketUtils import *
@@ -16,10 +17,12 @@ FIN_ACK_ATTEMPTS = 3
 
 TERMINATION_SCHEDULER_DELAY = 5
 
+RANDOM_DROP_PROB = 0.0
+
 if __name__ == '__main__':
 
     if len(sys.argv) != 5:
-        print("Usage: python3 ReceiverSlave.py <slave_master_port> <slave_slave_port> <receiver_master_DNS_name> <receiver_master_port_number>")
+        print("Usage: python3 ReceiverSlave.py <intra_port> <inter_port> <receiver_master_DNS_name> <receiver_master_port>")
         sys.exit()
     
     try:
@@ -61,6 +64,8 @@ if __name__ == '__main__':
         print("Listening to sender slave")
         while not is_terminated.get():
             packet, address = inter_socket.recvfrom(PacketSize.SENDER_SLAVE_TO_RECEIVER)
+            if random.uniform(0, 1) < RANDOM_DROP_PROB:
+                continue
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
             print("Packet received from sender slave, packet type {}".format(PacketType.translate(packet_type)))
@@ -82,6 +87,8 @@ if __name__ == '__main__':
         print("Listening to receiver master")
         while not is_terminated.get():
             packet, address = intra_socket.recvfrom(PacketSize.RECEIVER_MASTER_TO_SLAVE)
+            if random.uniform(0, 1) < RANDOM_DROP_PROB:
+                continue
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
             print("Packet received from receiver master, packet type {}".format(PacketType.translate(packet_type)))
@@ -94,7 +101,8 @@ if __name__ == '__main__':
                 intra_socket.sendto(pickle.dumps(syn_ack_received_packet), address)
             elif packet_type == PacketType.PING:
                 last_received_sequences_size = decoded_packet['last_received_sequences_size']
-                new_received_sequences = list(received_sequence_set)[last_received_sequences_size:]
+                new_received_sequences = received_sequences[last_received_sequences_size:]
+                print("Newly received sequences since last PING_ACK sent {}".format(new_received_sequences))
                 ping_ack_packet = { 'packet_type': PacketType.PING_ACK, 'slave_id': slave_id, 'new_received_sequences': new_received_sequences }
                 intra_socket.sendto(pickle.dumps(ping_ack_packet), address)
             elif packet_type == PacketType.FIN:

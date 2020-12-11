@@ -23,17 +23,21 @@ SLAVE_FIN_ATTEMPTS = 3
 SENDER_FIN_ATTEMPTS = 3
 RECEIVER_ADDRESSES_ATTEMPTS = 3
 ACK_ATTEMPTS = 3
-PING_ATTEMPTS = 0
+PING_ATTEMPTS = 5
 
 ACK_SCHEDULER_DELAY = 5
 PING_SCHEDULER_DELAY = 1
 TERMINATION_SCHEDULER_DELAY = 5
 MAX_STALE_ATTEMPTS = 3
+STALE_ACTIVATE_THRESHOLD = 30
+MAX_MISSING_SEQUENCES_LEN = 250
+
+RANDOM_DROP_PROB = 0.0
 
 if __name__ == '__main__':
 
     if len(sys.argv) != 4:
-        print("Usage: python3 ReceiverMaster.py <master_master_port> <master_slave_port> <output_file>")
+        print("Usage: python3 ReceiverMaster.py <inter_port> <intra_port> <output_file>")
         sys.exit()
     
     try:
@@ -78,6 +82,8 @@ if __name__ == '__main__':
         print("Listening to sender master")
         while not is_terminated.get():
             packet, address = inter_socket.recvfrom(PacketSize.SENDER_MASTER_TO_RECEIVER)
+            if random.uniform(0, 1) < RANDOM_DROP_PROB:
+                continue
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
             print("Packet received from sender master, packet type {}".format(PacketType.translate(packet_type)))
@@ -113,6 +119,8 @@ if __name__ == '__main__':
         print("Listening to receiver slaves")
         while not is_terminated.get():
             packet, address = intra_socket.recvfrom(PacketSize.RECEIVER_SLAVE_TO_MASTER)
+            if random.uniform(0, 1) < RANDOM_DROP_PROB:
+                continue
             decoded_packet = pickle.loads(packet)
             slave_id = decoded_packet['slave_id']
             packet_type = decoded_packet['packet_type']
@@ -261,7 +269,7 @@ if __name__ == '__main__':
                 for i in range(sequence_ceil, number_of_segments):
                     if i in received_sequence_set:
                         max_ack_sequence_number = i
-                if sequence_ceil == max_ack_sequence_number and sequence_ceil != -1:
+                if sequence_ceil == max_ack_sequence_number and sequence_ceil != -1 and number_of_segments - sequence_ceil <= STALE_ACTIVATE_THRESHOLD:
                     # sequence_ceil has not been moved since last scheduled event
                     stale_counter += 1
                     if stale_counter >= MAX_STALE_ATTEMPTS:
@@ -286,7 +294,10 @@ if __name__ == '__main__':
                 if sender_master_ack_timer != None:
                     # terminate previously unsent ack packet, sending the updated one
                     sender_master_ack_timer.cancel()
-                ack_packet = { 'packet_type': PacketType.ACK, 'missing_sequence_numbers': missing_sequence_numbers }
+                # we only send a portion of missing sequence numbers at a time to prevent the message being too large,
+                # missing numbers that are lower have higher priority as they can increase the base to reduce the amount computation in later ack event.
+                missing_sequence_numbers.reverse()
+                ack_packet = { 'packet_type': PacketType.ACK, 'missing_sequence_numbers': missing_sequence_numbers[0:MAX_MISSING_SEQUENCES_LEN] }
                 sender_master_ack_timer = threading.Timer(ACK_TIMEOUT, ack_timeout_handler, [ack_packet, ACK_ATTEMPTS])
                 sender_master_ack_timer.start()
                 inter_socket.sendto(pickle.dumps(ack_packet), sender_master_address)
@@ -307,6 +318,9 @@ if __name__ == '__main__':
                 if slave_id in slave_received_sequences:
                     last_received_sequences_size = len(slave_received_sequences[slave_id])
                 ping_packet = { 'packet_type': PacketType.PING, 'last_received_sequences_size': last_received_sequences_size }
+                # ignore old timer
+                if slave_id in slave_ping_timers:
+                    slave_ping_timers[slave_id].cancel()
                 slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
                 slave_ping_timers[slave_id].start()
                 intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
@@ -320,6 +334,11 @@ if __name__ == '__main__':
 
     def generate_output_file():
         packet_positions = [None] * number_of_segments
+        try:
+            os.remove(output_file)
+            print("Deleted original file")
+        except Exception:
+            print("New file")
         for slave_id, received_sequences in slave_received_sequences.items():
             for i in range(0, len(received_sequences)):
                 sequence = received_sequences[i]

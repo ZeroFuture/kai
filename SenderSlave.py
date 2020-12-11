@@ -4,6 +4,7 @@ import time
 import os
 import uuid
 import pickle
+import random
 from socket import *
 from AtomicUtils import *
 from PacketUtils import *
@@ -16,10 +17,12 @@ FIN_ACK_ATTEMPTS = 3
 
 TERMINATION_SCHEDULER_DELAY = 5
 
+RANDOM_DROP_PROB = 0.0
+
 if __name__ == '__main__':
 
     if len(sys.argv) != 5:
-        print("Usage: python3 SenderSlave.py <slave_master_port> <slave_slave_port> <sender_master_DNS_name> <sender_master_port_number>")
+        print("Usage: python3 SenderSlave.py <intra_port> <inter_port> <sender_master_DNS_name> <sender_master_port>")
         sys.exit()
 
     try:
@@ -45,6 +48,7 @@ if __name__ == '__main__':
     slave_id = str(uuid.uuid1())
     print("Slave ID {}".format(slave_id))
 
+    is_joined = AtomicBoolean(False)
     is_terminated = AtomicBoolean(False)
 
     def join_cluster():
@@ -58,18 +62,22 @@ if __name__ == '__main__':
     def sender_master_listener():
         print("Listening to sender master")
         global sender_master_fin_ack_timer
+        global input_file
         while not is_terminated.get():
             packet, address = intra_socket.recvfrom(PacketSize.SENDER_MASTER_TO_SLAVE)
+            if random.uniform(0, 1) < RANDOM_DROP_PROB:
+                continue
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
             print("Packet received from sender master, packet type {}".format(PacketType.translate(packet_type)))
             if packet_type == PacketType.SYN_ACK:
                 input_file = decoded_packet['input_file']
                 print("Joined sender cluster, input file {}".format(input_file))
+                is_joined.set(True)
                 sender_master_syn_timer.cancel()
                 syn_ack_received_packet = { 'packet_type': PacketType.SYN_ACK_RECEIVED, 'slave_id': slave_id }
                 intra_socket.sendto(pickle.dumps(syn_ack_received_packet), address)
-            elif packet_type == PacketType.ASSIGN and input_file != None:
+            elif packet_type == PacketType.ASSIGN and is_joined.get() and input_file != None:
                 # SYN_ACK should be received previous to ASSIGN, but the packet might arrive later.
                 # Eventually we can still get input file because if we do not send ASSIGN_ACK, master will send it again
                 # SYN_ACK will be sent again as well

@@ -20,16 +20,18 @@ SYN_ATTEMPTS = 3
 SYN_ACK_ATTEMPTS = 3
 FIN_ATTEMPTS = 3
 FIN_ACK_ATTEMPTS = 3
-PING_ATTEMPTS = 0
+PING_ATTEMPTS = 5
 
 PING_SCHEDULER_DELAY = 1
 WAIT_SLAVES_DELAY = 1
 TERMINATION_SCHEDULER_DELAY = 5
 
+RANDOM_DROP_PROB = 0.0
+
 if __name__ == '__main__':
     
     if len(sys.argv) != 6:
-        print("Usage: python3 SenderMaster.py <master_master_port> <master_slave_port> <receiver_master_ip> <receiver_master_port> <input_file>")
+        print("Usage: python3 SenderMaster.py <inter_port> <intra_port> <receiver_master_ip> <receiver_master_port> <input_file>")
         sys.exit()
 
     try:
@@ -94,6 +96,8 @@ if __name__ == '__main__':
         print("Listening to sender slaves")
         while not is_terminated.get():
             packet, address = intra_socket.recvfrom(PacketSize.SENDER_SLAVE_TO_MASTER)
+            if random.uniform(0, 1) < RANDOM_DROP_PROB:
+                continue
             decoded_packet = pickle.loads(packet)
             slave_id = decoded_packet['slave_id']
             packet_type = decoded_packet['packet_type']
@@ -135,6 +139,8 @@ if __name__ == '__main__':
         print("Listening to receiver master")
         while not is_terminated.get():
             packet, address = inter_socket.recvfrom(PacketSize.RECEIVER_MASTER_TO_SENDER)
+            if random.uniform(0, 1) < RANDOM_DROP_PROB:
+                continue
             decoded_packet = pickle.loads(packet)
             packet_type = decoded_packet['packet_type']
             print("Packet received from receiver master, packet type {}".format(PacketType.translate(packet_type)))
@@ -243,6 +249,9 @@ if __name__ == '__main__':
             slave_addresses_copy = copy.deepcopy(slave_addresses)
             for slave_id, slave_address in slave_addresses_copy.items():
                 ping_packet = { 'packet_type': PacketType.PING }
+                # ignore old timer
+                if slave_id in slave_ping_timers:
+                    slave_ping_timers[slave_id].cancel()
                 slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
                 slave_ping_timers[slave_id].start()
                 intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
