@@ -19,28 +19,39 @@ To start the whole protocol, you should start the `ReceiverMaster.py` first, the
 ### Starting `ReceiverMaster.py`
 
 To start `ReceiverMaster.py`, run `python3 ReceiverMaster.py <inter_port> <intra_port> <output_file>`
+
 `inter_port` is the port used to communicate with the sender master
+
 `intra_port` is the port used to communicate with the receiver slaves
 
 ### Starting `SenderMaster.py`
 
 To start `SenderMaster.py`, run `python3 SenderMaster.py <inter_port> <intra_port> <receiver_master_ip> <receiver_master_port> <input_file>`
+
 `inter_port` is the port used to communicate with the receiver master
+
 `intra_port` is the port used to communicate with the sender slaves
+
 `receiver_master_port` is the same as the `inter_port` of the receiver master
 
 ### Starting `ReceiverSlave.py`
 
 To start `ReceiverSlave.py`, run `python3 ReceiverSlave.py <intra_port> <inter_port> <receiver_master_DNS_name> <receiver_master_port>`
+
 `intra_port` is the port used to communicate with the receiver master
+
 `inter_port` is the port used to communicate with the sender slaves
+
 `receiver_master_port` is the same as the `intra_port` of the receiver master
 
 ### Starting `SenderSlave.py`
 
 To start `SenderSlave.py`, run `python3 SenderSlave.py <intra_port> <inter_port> <sender_master_DNS_name> <sender_master_port>`
+
 `intra_port` is the port used to communicate with the sender master
+
 `inter_port` is the port used to communicate with the receiver slaves
+
 `sender_master_port` is the same as the `intra_port` of the sender master
 
 ## Configurations
