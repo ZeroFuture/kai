@@ -33,7 +33,7 @@ STALE_ACTIVATE_THRESHOLD = 30
 
 MAX_MISSING_SEQUENCES_LEN = 1000
 
-RANDOM_DROP_PROB = 0.0
+RANDOM_DROP_PROB = 0.05
 
 if __name__ == '__main__':
 
@@ -63,6 +63,7 @@ if __name__ == '__main__':
     slave_syn_ack_timers = {}
     slave_fin_timers = {}
     slave_ping_timers = {}
+    slave_ping_remaining_attempts = {}
     sender_master_syn_ack_timer = None
     sender_master_receiver_addresses_timer = None
     sender_master_ack_timer = None
@@ -74,6 +75,7 @@ if __name__ == '__main__':
     slave_received_sequences = {}
     received_sequence_set = set()
 
+    is_sender_terminated = AtomicBoolean(False)
     is_terminated = AtomicBoolean(False)
 
     def sender_master_listener():
@@ -154,7 +156,9 @@ if __name__ == '__main__':
                     slave_received_sequences[slave_id].append(sequence)
                     received_sequence_set.add(sequence)
                 slave_ping_timers[slave_id].cancel()
+                slave_ping_remaining_attempts[slave_id] = PING_ATTEMPTS
             elif packet_type == PacketType.FIN_ACK:
+                is_sender_terminated.set(True)
                 fin_ack_received_packet = { 'packet_type': PacketType.FIN_ACK_RECEIVED }
                 intra_socket.sendto(pickle.dumps(fin_ack_received_packet), address)
                 if slave_id in slave_fin_timers:
@@ -166,9 +170,6 @@ if __name__ == '__main__':
                     # finished termination with this slave, removing it from the list
                     slave_addresses.pop(slave_id)
                     if len(slave_addresses) == 0:
-                        print("All slaves are terminated, generate output file")
-                        generate_output_file()
-                        print("Output file generated, closing")
                         # all slaves and sender master is terminated, terminate receiver master here
                         is_terminated.set(True)
         intra_socket.close()
@@ -212,6 +213,16 @@ if __name__ == '__main__':
             slave_fin_timers[slave_id] = threading.Timer(SLAVE_FIN_TIMEOUT, slave_fin_timeout_handler, [slave_id, fin_packet, slave_address, remaining_attempts - 1])
             slave_fin_timers[slave_id].start()
             intra_socket.sendto(pickle.dumps(fin_packet), slave_address)
+        else:
+            # slave is possibly down, removing from the list
+            print("Slave {} down, FIN reached max attempts".format(slave_id))
+            slave_addresses.pop(slave_id)
+            if slave_id in slave_ping_timers:
+                slave_ping_timers[slave_id].cancel()
+                slave_ping_timers.pop(slave_id)
+            slave_inter_ports.pop(slave_id)
+            if is_sender_terminated.get() and len(slave_addresses) == 0:
+                is_terminated.set(True)
 
     def sender_fin_timeout_handler(fin_packet, remaining_attempts):
         if is_terminated.get():
@@ -233,27 +244,34 @@ if __name__ == '__main__':
             sender_master_ack_timer.start()
             inter_socket.sendto(pickle.dumps(ack_packet), sender_master_address)
     
-    def ping_timeout_handler(slave_id, ping_packet, slave_address, remaining_attempts):
+    def ping_timeout_handler(slave_id, ping_packet, slave_address):
         if is_terminated.get() or not slave_id in slave_address:
             return
         global sequence_base
+        slave_ping_remaining_attempts[slave_id] -= 1
+        remaining_attempts = slave_ping_remaining_attempts[slave_id]
         if remaining_attempts > 0:
             print("PING timeout, retry left {}".format(remaining_attempts))
-            slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, remaining_attempts - 1])
+            slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address])
             slave_ping_timers[slave_id].start()
             intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
         else:
             # slave down, removing from the list
             print("Slave {} down, health check reached max attempts".format(slave_id))
             slave_addresses.pop(slave_id)
-            slave_ping_timers.pop(slave_id)
+            if slave_id in slave_ping_timers:
+                slave_ping_timers[slave_id].cancel()
+                slave_ping_timers.pop(slave_id)
             slave_inter_ports.pop(slave_id)
-            inter_ports = list(slave_inter_ports.values())
-            print("Noticing sender master about current available slaves {}".format(inter_ports))
-            receiver_addresses_packet = { 'packet_type': PacketType.RECEIVER_ADDRESSES, 'slave_addresses': inter_ports }
-            sender_master_receiver_addresses_timer = threading.Timer(RECEIVER_ADDRESSES_TIMEOUT, receiver_addresses_timeout_handler, [receiver_addresses_packet, RECEIVER_ADDRESSES_ATTEMPTS])
-            sender_master_receiver_addresses_timer.start()
-            inter_socket.sendto(pickle.dumps(receiver_addresses_packet), sender_master_address)
+            if is_sender_terminated.get() and len(slave_addresses) == 0:
+                is_terminated.set(True)
+            else:
+                inter_ports = list(slave_inter_ports.values())
+                print("Noticing sender master about current available slaves {}".format(inter_ports))
+                receiver_addresses_packet = { 'packet_type': PacketType.RECEIVER_ADDRESSES, 'slave_addresses': inter_ports }
+                sender_master_receiver_addresses_timer = threading.Timer(RECEIVER_ADDRESSES_TIMEOUT, receiver_addresses_timeout_handler, [receiver_addresses_packet, RECEIVER_ADDRESSES_ATTEMPTS])
+                sender_master_receiver_addresses_timer.start()
+                inter_socket.sendto(pickle.dumps(receiver_addresses_packet), sender_master_address)
     
     def ack_schedule_event():
         global sender_master_ack_timer
@@ -322,7 +340,7 @@ if __name__ == '__main__':
                 # ignore old timer
                 if slave_id in slave_ping_timers:
                     slave_ping_timers[slave_id].cancel()
-                slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
+                slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address])
                 slave_ping_timers[slave_id].start()
                 intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
             time.sleep(PING_SCHEDULER_DELAY)
@@ -330,6 +348,9 @@ if __name__ == '__main__':
     def termination_schedule_event():
         while True:
             if is_terminated.get():
+                print("All slaves are terminated, generate output file")
+                generate_output_file()
+                print("Output file generated, closing")
                 os._exit(0)
             time.sleep(TERMINATION_SCHEDULER_DELAY)
 
@@ -352,7 +373,7 @@ if __name__ == '__main__':
                     sf.seek(index * PacketSize.DATA_SEGMENT)
                     data = sf.read(PacketSize.DATA_SEGMENT)
                 of.write(data)
-        # clean temp file
+        # clean slave temp files
         for slave_id in slave_received_sequences:
             slave_file = output_file.split('.')[0] + '_' + slave_id + '.' + output_file.split('.')[1]
             os.remove(slave_file)

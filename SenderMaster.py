@@ -26,7 +26,7 @@ PING_SCHEDULER_DELAY = 1
 WAIT_SLAVES_DELAY = 1
 TERMINATION_SCHEDULER_DELAY = 5
 
-RANDOM_DROP_PROB = 0.0
+RANDOM_DROP_PROB = 0.05
 
 if __name__ == '__main__':
     
@@ -56,6 +56,7 @@ if __name__ == '__main__':
     slave_syn_ack_timers = {}
     slave_fin_timers = {}
     slave_ping_timers = {}
+    slave_ping_remaining_attempts = {}
     receiver_master_syn_timer = None
     receiver_master_fin_ack_timer = None
     
@@ -113,6 +114,7 @@ if __name__ == '__main__':
             elif packet_type == PacketType.SYN_ACK_RECEIVED:
                 slave_syn_ack_timers[slave_id].cancel()
             elif packet_type == PacketType.PING_ACK and slave_id in slave_ping_timers:
+                slave_ping_remaining_attempts[slave_id] = PING_ATTEMPTS
                 slave_ping_timers[slave_id].cancel()
             elif packet_type == PacketType.FIN_ACK:
                 slave_fin_timers[slave_id].cancel()
@@ -218,6 +220,15 @@ if __name__ == '__main__':
             slave_fin_timers[slave_id] = threading.Timer(FIN_TIMEOUT, fin_timeout_handler, [slave_id, fin_packet, slave_address, remaining_attempts - 1])
             slave_fin_timers[slave_id].start()
             intra_socket.sendto(pickle.dumps(fin_packet), slave_address)
+        else:
+            # slave down, removing from the list
+            print("Slave {} down, FIN reached max attempts".format(slave_id))
+            slave_addresses.pop(slave_id)
+            if slave_id in slave_ping_timers:
+                slave_ping_timers[slave_id].cancel()
+                slave_ping_timers.pop(slave_id)
+            if len(slave_addresses) == 0 and is_receiver_terminated.get():
+                    is_terminated.set(True)
 
     def fin_ack_timeout_handler(fin_ack_packet, remaining_attempts):
         if is_terminated.get():
@@ -230,19 +241,26 @@ if __name__ == '__main__':
             receiver_master_fin_ack_timer.start()
             inter_socket.sendto(pickle.dumps(fin_ack_packet), receiver_master_address)
 
-    def ping_timeout_handler(slave_id, ping_packet, slave_address, remaining_attempts):
+    def ping_timeout_handler(slave_id, ping_packet, slave_address):
         if is_terminated.get() or not slave_id in slave_addresses:
             return
+        slave_ping_remaining_attempts[slave_id] -= 1
+        remaining_attempts = slave_ping_remaining_attempts[slave_id]
         if remaining_attempts > 0:
             print("PING timeout, retry left {}".format(remaining_attempts))
-            slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, remaining_attempts - 1])
+            slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address])
             slave_ping_timers[slave_id].start()
             intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
         else:
             # slave down, removing from the list
             print("Slave {} down, health check reached max attempts".format(slave_id))
             slave_addresses.pop(slave_id)
-            slave_ping_timers.pop(slave_id)
+            if slave_id in slave_ping_timers:
+                slave_ping_timers[slave_id].cancel()
+                slave_ping_timers.pop(slave_id)
+            if len(slave_addresses) == 0 and is_receiver_terminated.get():
+                    is_terminated.set(True)
+            
 
     def ping_schedule_event():
         while not is_terminated.get():
@@ -252,7 +270,7 @@ if __name__ == '__main__':
                 # ignore old timer
                 if slave_id in slave_ping_timers:
                     slave_ping_timers[slave_id].cancel()
-                slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address, PING_ATTEMPTS])
+                slave_ping_timers[slave_id] = threading.Timer(PING_TIMEOUT, ping_timeout_handler, [slave_id, ping_packet, slave_address])
                 slave_ping_timers[slave_id].start()
                 intra_socket.sendto(pickle.dumps(ping_packet), slave_address)
             time.sleep(PING_SCHEDULER_DELAY)
