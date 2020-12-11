@@ -78,6 +78,9 @@ if __name__ == '__main__':
                     received_sequences.append(sequence_number)
                     received_sequence_set.add(sequence_number)
                     data = decoded_packet['data']
+                    # offset the last packet which may not be in the size of PacketSize.DATA_SEGMENT
+                    if len(data.encode('utf-8')) < PacketSize.DATA_SEGMENT:
+                        data += (PacketSize.DATA_SEGMENT - len(data.encode('utf-8'))) * " " 
                     with open(slave_file, 'a') as f:
                         f.write(data)
                     print("Data with sequence {} received and write to temp file".format(sequence_number))
