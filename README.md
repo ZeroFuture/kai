@@ -6,7 +6,7 @@ Developed by Zhidong Qu, Jiayan Wei, and Ziqi Tang.
 
 There are two simple examples for the protocol. `single_slave_example.py` runs a single sender slave and a single receiver slave for the data transmission. `multiple_slave_example.py` runs 3 sender slave and 3 receiver slaves by default which is also configurable by changing the `number_of_sender_slaves` and `number_of_receiver_slaves` variables in the script. Both examples assumes that you have the default ports open in your machine, if you run into exceptions related to ports, try to manually modify the port numbers in the script to whatever you have available on your machine. 
 
-Currently the script can only run on Mac OS, if you are running this on Mac, you also needs to install a packet `applescript` by running `pip3 install applescript` or `pip install applescript`. Finally, you can run both scripts with `python3 <script name>` under the working directory.
+Currently the script can only run on Mac OS, if you are running this on Mac, you also needs to install a packet `applescript` by running `pip3 install applescript`. Finally, you can run both scripts with `python3 <script name>` under the working directory.
 
 If you can not run the script above or want to manually run the whole protocol, see the tutorial below.
 
